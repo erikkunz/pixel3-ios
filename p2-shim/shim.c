@@ -161,7 +161,7 @@ static void zero64(uint64_t dst, uint64_t n)
 
 static int magic_ok(const char *m)
 {
-	static const char want[8] = "PIXEL3PL";
+	static const char want[] = "PIXEL3PL";
 	for (int i = 0; i < 8; i++)
 		if (m[i] != want[i])
 			return 0;

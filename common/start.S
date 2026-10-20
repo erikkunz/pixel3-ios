@@ -7,8 +7,9 @@
  *
  * text_offset is 0x80000 on purpose: mainline Linux notes that recent
  * Pixel 3 bootloaders refuse an Image whose header has text_offset 0.
- * The code is position independent (adr only), so the load address
- * does not matter.
+ * The code is position independent (adr/adrp only), so the load address
+ * does not matter. Symbols past the payload are beyond adr's 1 MiB reach;
+ * those use adrp (4K-page relative: ABL loads us 4K aligned).
  */
 	.section .text.head, "ax"
 	.globl _head
@@ -30,13 +31,16 @@ _start:
 	msr	daifset, #0xf
 	mov	x19, x0			/* DTB from ABL */
 	msr	spsel, #1
-	adr	x1, _stack_top
+	adrp	x1, _stack_top
+	add	x1, x1, :lo12:_stack_top
 	mov	sp, x1
 	adr	x1, vectors
 	msr	vbar_el1, x1
 	isb
-	adr	x1, _bss_start
-	adr	x2, _bss_end
+	adrp	x1, _bss_start
+	add	x1, x1, :lo12:_bss_start
+	adrp	x2, _bss_end
+	add	x2, x2, :lo12:_bss_end
 1:	cmp	x1, x2
 	b.hs	2f
 	str	xzr, [x1], #8
@@ -78,7 +82,8 @@ vectors:
 	vent 15
 
 exc_entry:
-	adr	x1, _stack_top		/* fresh stack: the old one may be the problem */
+	adrp	x1, _stack_top
+	add	x1, x1, :lo12:_stack_top		/* fresh stack: the old one may be the problem */
 	mov	sp, x1
 	bl	exc_handler
 4:	wfe

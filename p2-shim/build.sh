@@ -8,9 +8,13 @@
 # With a stock boot.img (e.g. LineageOS's), its DTBs and load addresses
 # are reused. Toolchain notes: ../common/build.sh.
 set -euo pipefail
-cd "$(dirname "$0")"
 [ $# -ge 1 ] || { sed -n '2,9p' "$0"; exit 1; }
+# Absolute paths first: relative ones are meant from the caller's directory.
 payload=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+stock=${2:-}
+[ -z "$stock" ] || stock=$(cd "$(dirname "$stock")" && pwd)/$(basename "$stock")
+cd "$(dirname "$0")"
+rm -f out/shim.img		# never leave an older image behind on failure
 . ../common/build.sh
 CFLAGS="$CFLAGS -DPAYLOAD=\"$payload\""
-build_image shim "shim.c payload.S" "${2:-}"
+build_image shim "shim.c payload.S" "$stock"
