@@ -228,6 +228,20 @@ the kernel output, then launchd kept spawning daemons: `exec xpcproxy`,
 hardware crash and are relaunched). Waiting to see whether it reaches
 backboardd/SpringBoard (sweet: about 4-5 minutes on first boot).
 
+**Log of that boot** (`tools/phone.sh log`, 2212 lines): ~100 daemons start
+once and stay up; `bluetoothd` and `fairplayd.H2` crash-loop (no hardware /
+no SEP), `driverkitd` was killed once. backboardd opens AppleCLCD
+1080x2160, creates IOSurfaces and presents 5 frames (the Apple logo), then
+backboardd and SpringBoard sit blocked (process sampler). No data
+migration runs (no `migrationpluginwrapper`). Kernel text keeps drawing
+over the panel because nothing mutes the console yet.
+
+**SMP: all eight cores (2026-10-21).** Kernel = ios-sweet 0001-0059 + 0065
++ our 0101 (CI 39511860472), ADT `--cpus 8`, `cpus=8`: CPU_ON rc=0 and
+"came alive; SGI1 OK" for MPIDR 0x100..0x700, then
+`SWEET CPU: 8/8 CPUs initialized, SGI1 verified`. Silver and Gold run as
+one homogeneous cluster (the scheduler does not prefer the Gold cores).
+
 Root image tools (ours; which iOS details matter is from ios-sweet's notes):
 
 | Tool | What |
