@@ -242,6 +242,16 @@ over the panel because nothing mutes the console yet.
 `SWEET CPU: 8/8 CPUs initialized, SGI1 verified`. Silver and Gold run as
 one homogeneous cluster (the scheduler does not prefer the Gold cores).
 
+**8 cores are slow (display kernel, CI 39512538196, `cpus=8`).** Every
+hand-off between processes stalls for minutes: launchd's data-protection
+task (`seputil`, 0.16 s on one core) took 16:01:45 -> 16:04:51, the next
+gap was to 16:07:03, and the kernel's log thread, which sleeps one second
+per flush, flushed only 8 times in ~7 minutes. All 8 cores passed their
+SGI test, and each core enables INTID 19 + SGI 1 on its own
+redistributor, so suspect: the virtual timer interrupt on secondary cores
+not arriving (timed wakeups on those cores lost). Test: same kernel with
+`cpus=1` and `cpus=4` (Silver only).
+
 Root image tools (ours; which iOS details matter is from ios-sweet's notes):
 
 | Tool | What |
