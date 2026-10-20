@@ -180,12 +180,14 @@ def build(qemu=False, cpus=1, seed=None, ufs=False, iphone=None):
         defaults.set('no-effaceable-storage', u32(1))
         # watchdogd: no PMU to report boot stages to.
         arm_io.children.append(node('wdt', {'no-pmu': u32(1)}))
-        # IOMobileFramebuffer counts these; canvas = what iOS draws.
+        # IOMobileFramebuffer counts these; canvas = what iOS draws: the
+        # iPhone X panel, which the kernel (patch 0061) presents and crops
+        # to the 1080x2160 Pixel panel.
         arm_io.children.append(node('disp0', {
             'device_type': strs('display-subsystem'),
             'compatible': strs('sweet,display'),
-            'canvas-width': u32(FB_W),
-            'canvas-height': u32(FB_H),
+            'canvas-width': u32(1125),
+            'canvas-height': u32(2436),
         }))
         # MobileGestalt HomeButtonType 2: no Home button (gesture UI).
         extra.append(node('buttons', {

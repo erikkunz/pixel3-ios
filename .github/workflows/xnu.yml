@@ -31,9 +31,12 @@ env:
   # and framebuffer services, HID services, iPhone identity. 0060 and later
   # drive sweet's own keys, touch, regulators and USB; not for blueline as is.
   SWEET_LAST: "0059"
-  # Later ios-sweet patches taken individually: 0065 = SMP via PSCI CPU_ON
-  # (our 0101 lifts its six-core A55 limit to the Pixel 3's eight cores).
-  SWEET_EXTRA: "0065"
+  # Later ios-sweet patches taken individually (generic, no sweet hardware):
+  # 0061 present the display as the iPhone X's 1125x2436 (our 0102 sets the
+  # Pixel's 2160 rows), 0064 PRIV_WORK_INTERVAL for SpringBoard, 0065 SMP via
+  # PSCI CPU_ON (our 0101 lifts its six-core limit to eight), 0067 console
+  # mute once the GUI presents (sweetfb_noconsole=1), 0070 pid_hibernate.
+  SWEET_EXTRA: "0061 0064 0065 0067 0070"
   MACOS_VERSION: "13.5"			# xnu-8796.141.3, the iOS 16 generation
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: SWEET
