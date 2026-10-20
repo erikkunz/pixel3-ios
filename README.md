@@ -219,6 +219,15 @@ Cause: our `img2simg.py` wrote all-zero blocks as DONT_CARE, so zero blocks
 inside files kept LineageOS's old bytes. Fixed (FILL chunks with value 0);
 reflash needed.
 
+**Second flash and boot (2026-10-21 00:50): iOS userland runs.** Reflash
+with the fixed sparse image: 445 s (zero blocks now written). ABL then hung
+receiving the boot image (as on sweet after big flashes); Power + Volume
+Down, then `fastboot boot` worked. The Apple logo appeared briefly between
+the kernel output, then launchd kept spawning daemons: `exec xpcproxy`,
+`exec bluetoothd`, `fairplayd.H2`, ... in a loop (daemons for absent
+hardware crash and are relaunched). Waiting to see whether it reaches
+backboardd/SpringBoard (sweet: about 4-5 minutes on first boot).
+
 Root image tools (ours; which iOS details matter is from ios-sweet's notes):
 
 | Tool | What |
