@@ -54,7 +54,10 @@ else
 	DTB=../dtb/sdm845-google-blueline.dtb
 	LIKE=""
 fi
-python3 ../tools/bootimg.py pack -o out/probe-v1.img --header-version 1 --kernel out/Image --dtb "$DTB" $LIKE
-python3 ../tools/bootimg.py pack -o out/probe-v2.img --header-version 2 --kernel out/Image --dtb "$DTB" $LIKE
-python3 ../tools/bootimg.py info out/probe-v1.img | sed -n '1,3p;/DTBs/,$p'
-ls -l out/Image out/probe-v1.img out/probe-v2.img
+# The Pixel 3 bootloader rejects an uncompressed Image ("Error verifying
+# the received boot.img: Unsupported"); a gzip'd one with the DTB
+# appended (header v1, like Image.gz-dtb) boots.
+gzip -9 -n -c out/Image > out/Image.gz
+python3 ../tools/bootimg.py pack -o out/probe.img --header-version 1 --kernel out/Image.gz --dtb "$DTB" $LIKE
+python3 ../tools/bootimg.py info out/probe.img | sed -n '1,3p;/DTBs/,$p'
+ls -l out/Image out/probe.img

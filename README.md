@@ -23,12 +23,13 @@ After 90 more seconds it reboots straight back into fastboot.
 Phone in fastboot (power off, then hold Power + Volume Down), USB connected:
 
 ```sh
-fastboot boot p1-probe/out/probe-v1.img
+fastboot boot p1-probe/out/probe.img
 ```
 
 `fastboot boot` only loads the image into RAM for one boot; nothing is
-flashed. If the phone stays in fastboot or says the image is invalid, try
-`probe-v2.img` (same probe, DTB in a separate section).
+flashed. The kernel must be gzip-compressed: the Pixel 3 bootloader
+rejects an uncompressed Image with "Error verifying the received
+boot.img: Unsupported".
 
 If the auto-reboot lands in LineageOS instead of fastboot, that's fine:
 `adb reboot bootloader` gets you back.
@@ -61,6 +62,25 @@ and `pmemsave 0x9d400000 9331200 fb.raw` from the QEMU monitor to grab the scree
 
 `tools/bootimg.py info boot.img` shows any boot image's header, load
 addresses and DTBs.
+
+### Result of the first run (2026-10-20, LineageOS bootloader, mainline DTB)
+
+Everything works, including the refresh test: the bootloader leaves the
+command-mode panel refreshing from `0x9d400000`, so ios-sweet's
+copy-to-framebuffer display path works unchanged.
+
+| Item | Value |
+| --- | --- |
+| CPU | MIDR `0x517f803c` (Kryo 385 Silver), boot MPIDR `0x81000000` (core number in Aff1, MT set) |
+| Pages / PA | 16K granule supported, PARange 40-bit, GIC sysreg interface |
+| Firmware | PSCI 1.1, SMCCC 1.2, CNTFRQ 19.2 MHz, EL1 with MMU off |
+| Loaded at | image `0x80080000`, DTB `0x84500000`, initrd `0x84700000` |
+| RAM | one range `0x80000000`, size `0xfe0a0000` (4064 MiB) |
+| Carve-outs | all below `0x9f800000` except rmtfs `0xf2700000`+`0x202000` |
+| XNU candidate | `0xf2a00000`..`0x17e0a0000` (~2.2 GiB contiguous); fallback `0x9f800000`..`0xf2700000` (~1.3 GiB) |
+
+To do: repeat with the LineageOS `boot.img`'s own DTB to see any
+downstream-only carve-outs before settling the XNU memory range.
 
 ## Pixel 3 facts used here
 
