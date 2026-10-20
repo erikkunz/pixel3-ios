@@ -9,4 +9,4 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 . ../common/build.sh
-build_image probe probe.c "${1:-}"
+build_image probe "probe.c secondary.S" "${1:-}"

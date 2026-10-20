@@ -1,0 +1,66 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 0ae41bf..7697681 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -20,6 +20,7 @@
+ 
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
++extern "C" void sweet_smp_stats_print(void);	/* osfmk/arm64/cpu.c */
+ 
+ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+@@ -175,6 +176,13 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 	ml_set_max_cpus(topology->max_cpu_id + 1);
+ 	IOLog("SWEET CPU: %u/%u CPUs initialized, SGI1 verified\n",
+ 	    topology->num_cpus, topology->num_cpus);
++	/* Pixel 3: periodic per-CPU timer/IPI counters (osfmk/arm64/cpu.c). */
++	uint32_t stats_secs = 5;
++	PE_parse_boot_argn("sweetsmpstats", &stats_secs, sizeof(stats_secs));
++	while (stats_secs && topology->num_cpus > 1) {
++		IOSleep(stats_secs * 1000);
++		sweet_smp_stats_print();
++	}
+ 	thread_terminate(current_thread());
+ }
+ 
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index b082a10..6598d9f 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -975,6 +975,35 @@ sweet_cpu_signal_is_enabled(unsigned int cpu)
+ 	cpu_data_t *cdp = CpuDataEntries[cpu].cpu_data_vaddr;
+ 	return cdp != NULL && !(os_atomic_load(&cdp->cpu_signal, acquire) & SIGPdisabled);
+ }
++
++/*
++ * Pixel 3 SMP diagnostics: per CPU, the timer interrupts and IPIs taken so
++ * far and how far away its next timer deadline (rtcPop) is. Printed
++ * periodically by SweetCPU (boot-arg sweetsmpstats=N seconds, 0 = off).
++ */
++void sweet_smp_stats_print(void);
++void
++sweet_smp_stats_print(void)
++{
++	uint64_t now = mach_absolute_time(), ns;
++	absolutetime_to_nanoseconds(now, &ns);
++	printf("SWEET SMP: t=%llu ms on cpu%d\n", ns / NSEC_PER_MSEC, cpu_number());
++	for (unsigned int i = 0; i < MAX_CPUS; i++) {
++		cpu_data_t *cdp = CpuDataEntries[i].cpu_data_vaddr;
++		if (cdp == NULL) {
++			continue;
++		}
++		uint64_t pop = os_atomic_load(&cdp->rtcPop, relaxed);
++		long long pop_ms = -1;
++		if (pop != EndOfAllTime && pop > now) {
++			absolutetime_to_nanoseconds(pop - now, &ns);
++			pop_ms = (long long)(ns / NSEC_PER_MSEC);
++		}
++		printf("SWEET SMP: cpu%u timer %llu ipi %llu next %lld ms\n", i,
++		    os_atomic_load(&cdp->cpu_stat.timer_cnt, relaxed),
++		    os_atomic_load(&cdp->cpu_stat.ipi_cnt, relaxed), pop_ms);
++	}
++}
+ #endif
+ 
+ 
