@@ -8,12 +8,14 @@
 # the mainline sdm845-google-blueline.dtb in ../dtb/ is used.
 #
 # Needs LLVM (clang, ld.lld, llvm-objcopy, llvm-nm, llvm-readelf) and
-# python3. On macOS: `brew install llvm` and run with
+# python3. On macOS: `brew install llvm lld` and run with
 #   LLVM=$(brew --prefix llvm)/bin ./build.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 LLVM=${LLVM:-}
-bin() { if [ -n "$LLVM" ]; then echo "$LLVM/$1"; else echo "$1"; fi; }
+# Tools missing from $LLVM come from PATH (Homebrew ships ld.lld in its
+# own `lld` formula).
+bin() { if [ -n "$LLVM" ] && [ -x "$LLVM/$1" ]; then echo "$LLVM/$1"; else echo "$1"; fi; }
 CC=$(bin clang)
 TARGET=--target=aarch64-none-elf
 CFLAGS="$TARGET ${EXTRA_CFLAGS:-} -O2 -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie \

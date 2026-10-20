@@ -53,8 +53,9 @@ cd p1-probe
 ```
 
 Needs LLVM (`clang`, `ld.lld`, `llvm-objcopy`, `llvm-nm`, `llvm-readelf`)
-and `python3`. On macOS: `brew install llvm`, then
-`LLVM=$(brew --prefix llvm)/bin ./build.sh`.
+and `python3`. On macOS: `brew install llvm lld` (Homebrew ships `ld.lld`
+separately; `build.sh` takes any tool missing from `$LLVM` from `PATH`), then
+`PATH=$(brew --prefix lld)/bin:$PATH LLVM=$(brew --prefix llvm)/bin ./build.sh`.
 
 Emulator check (no phone needed): `EXTRA_CFLAGS=-DQEMU ./build.sh`, then run
 `out/Image` with `qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a55 -m 4G -kernel out/Image`
@@ -79,8 +80,47 @@ copy-to-framebuffer display path works unchanged.
 | Carve-outs | all below `0x9f800000` except rmtfs `0xf2700000`+`0x202000` |
 | XNU candidate | `0xf2a00000`..`0x17e0a0000` (~2.2 GiB contiguous); fallback `0x9f800000`..`0xf2700000` (~1.3 GiB) |
 
-To do: repeat with the LineageOS `boot.img`'s own DTB to see any
-downstream-only carve-outs before settling the XNU memory range.
+### Second run: LineageOS DTB (2026-10-20)
+
+Built with `./build.sh boot.img` from `lineage-22.2-20261005-nightly-blueline`
+(sha256 `15b794c4…69b6f5ba`, kept in the gitignored `stock/`). That boot.img is
+header v2 with an lz4 kernel and two SoC-only DTBs (SDM845 v2 and v2.1); the
+bootloader picked one and applied the Pixel overlay from the `dtbo` partition:
+MODEL `Google Inc. MSM sdm845 B1 DVT1.1`, COMPAT `google,b1c1-sdm845`, DTB
+487342 bytes. CPU, firmware, load addresses and RAM (one range, 4064 MiB) are
+the same as with the mainline DTB; the display and refresh test work as before.
+
+Downstream carve-outs (27, read off the screen photo; names cut to 9 chars):
+
+| Base | Size | Name | | Base | Size | Name |
+| --- | --- | --- | --- | --- | --- | --- |
+| `0x85700000` | `0x600000` | hyp | | `0x97800000` | `0x500000` | video |
+| `0x85e00000` | `0x100000` | xbl | | `0x97d00000` | `0x800000` | cdsp |
+| `0x85fc0000` | `0x2f40000` | removed | | `0x98500000` | `0x200000` | mba |
+| `0x8ab00000` | `0x1400000` | qseecom | | `0x98700000` | `0x1400000` | slpi |
+| `0x8bf00000` | `0x500000` | camera | | `0x99b00000` | `0x100000` | pil_spss |
+| `0x8c400000` | `0x10000` | ips_fw | | `0x9d400000` | `0x2400000` | cont_splash |
+| `0x8c410000` | `0x5000` | ipa_gsi | | `0xa1800000` | `0x10000` | debug_info |
+| `0x8c415000` | `0x2000` | gpu | | `0xa1810000` | `0x200000` | ramoops |
+| `0x8c500000` | `0x1a00000` | adsp | | `0xa1a10000` | `0x200000` | alt_ramoops |
+| `0x8df00000` | `0x100000` | wlan_fw | | `0xa1c10000` | `0x1000` | ramoops_meta |
+| `0x8e000000` | `0x9800000` | modem | | | | |
+
+Dynamic (size only, placed by Linux): adsp `0x1000000`, qseecom_ta
+`0x1000000`, secure_sp `0x800000`, secure_display `0x900000`, mem_dump
+`0x2400000`, linux,cma `0x2000000`. XNU doesn't need these.
+
+Differences from mainline: the Pixel overlay grows modem to `0x9800000`, which
+moves video..pil_spss up by `0x2000000` (node names like
+`video_region@0x95800000` are stale), and adds ramoops/debug_info at
+`0xa1800000`..`0xa1c11000`. Downstream has no fixed rmtfs; mainline's
+`0xf2700000` is a Linux-side choice.
+
+**XNU memory range:** every fixed carve-out in either tree ends by
+`0xa1c11000`, apart from mainline's rmtfs. Step 4 uses the range both trees
+agree is free, `0xf2a00000`..`0x17e0a0000` (~2.2 GiB). If we need more, or RAM
+below 4 GiB for DMA, `0xa2000000`..`0xf2700000` (~1.3 GiB) is also free; rmtfs
+only matters once something runs the modem.
 
 ## Pixel 3 facts used here
 
