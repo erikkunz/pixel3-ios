@@ -162,6 +162,26 @@ QEMU check of the whole loader path with a stand-in kernel
 `p2-shim/test/run-qemu.sh` must print `screen: GREEN (pass)`. Status
 2026-10-20: passes, and fails as it should with a wrong cmdline.
 
+### First XNU boot on the phone (2026-10-21)
+
+Kernel from CI run 39504429541 (ios-sweet 0001-0027 + our 0100), payload
+16.3 MB, `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam`,
+`fastboot boot` of `p2-shim/out/shim.img` built with the LineageOS DTBs.
+
+**XNU runs on the Pixel 3 and prints to the framebuffer.** The photo shows
+VM bootstrap and zone_init, OSLog/firehose, scheduler setup, "iBoot
+version: pixel3-shim" (our ADT), the SWEET PRNG, pthread and AMFI,
+"SWEET: platform expert registered", `ml_processor_register` and
+`cpu_start() cpu: 0`, the BSD copyright banner, MAC framework, and as the
+newest line `SWEET CPU: boot CPU 0 registered, SGI1 verified,
+initialization complete` (so the GIC delivers a self-IPI). The early
+marker band at the bottom is drawn too.
+
+In QEMU the same kernel continues with ktriage, SWEET HFS, mcache/mbinit,
+DLIL and Skywalk self-tests; on the phone the photo ends at the SWEET CPU
+line. Whether it stopped there or the photo was early: second photo
+pending.
+
 ## Pixel 3 facts used here
 
 | What | Value | Source |
