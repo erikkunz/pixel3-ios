@@ -26,9 +26,11 @@ env:
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   SWEET_REPO: https://github.com/dipa-studio/ios-sweet
   SWEET_SHA: 4c7cc91ea672b3ec539ad1d45f5c96784aa43f25
-  # ios-sweet patches used: 0001..SWEET_LAST. 0028 and later add the UFS
-  # root and writes to userdata; they stay out until we choose to add them.
-  SWEET_LAST: "0027"
+  # ios-sweet patches used: 0001..SWEET_LAST. Through 0059: UFS root (writes
+  # only with boot-arg ufsrw=1), AMFI/keystore/watchdog stand-ins, IOSurface
+  # and framebuffer services, HID services, iPhone identity. 0060 and later
+  # drive sweet's own keys, touch, regulators and USB; not for blueline as is.
+  SWEET_LAST: "0059"
   MACOS_VERSION: "13.5"			# xnu-8796.141.3, the iOS 16 generation
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: SWEET

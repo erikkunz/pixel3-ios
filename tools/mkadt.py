@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the Apple Device Tree for XNU on the Pixel 3 (blueline).
 
-  mkadt.py OUT.adt [--qemu] [--cpus N] [--dump]
+  mkadt.py OUT.adt [--qemu] [--cpus N] [--ufs] [--dump]
 
 The kernel is ios-sweet's SWEET machine config, so this provides what
 that boot path reads: /chosen (RAM range, entropy), /cpus, /arm-io/gic,
@@ -12,8 +12,9 @@ Names the kernel matches on: the root lists "xiaomi,sweet" and the CPUs
 list "qcom,kryo470" because ios-sweet's platform expert and CPU driver
 match those strings; the blueline names come first.
 
-Deliberately absent: any storage node. Nothing in the kernel can reach
-the phone's UFS (and LineageOS's data) until we add one on purpose.
+Storage only with --ufs: adds /sweet-ufs, the UFS host at 0x1d84000 that
+ios-sweet's root driver uses (rd=ufsroot0; read-only unless the boot-arg
+ufsrw=1 is also given). Without it the kernel cannot reach the phone's UFS.
 
 --qemu swaps in QEMU virt's GIC, timer frequency and timer interrupt
 (-M virt,gic-version=3) for emulator tests.
@@ -49,8 +50,11 @@ GICD_SIZE, GICR_SIZE = 0x10000, 0x100000	# 8 redistributors x 0x20000
 # core number in Aff1 (boot CPU MPIDR 0x81000000).
 CPU_HZ = [1766400000] * 4 + [2803200000] * 4
 
+# ufshc@1d84000 "std" registers (mainline sdm845.dtsi: size 0x2500)
+UFS, UFS_SIZE = 0x01d84000, 0x3000
 
-def build(qemu=False, cpus=1, seed=None):
+
+def build(qemu=False, cpus=1, seed=None, ufs=False):
     hw = QEMU if qemu else PHONE
     phandles = iter(range(1, 1 << 16))
 
@@ -115,13 +119,20 @@ def build(qemu=False, cpus=1, seed=None):
     # pmap_compute_max_asids() needs /defaults to exist.
     defaults = node('defaults')
 
+    storage = []
+    if ufs:
+        storage.append(node('sweet-ufs', {
+            'compatible': strs('qcom,ufshc'),
+            'reg': u64(UFS, UFS_SIZE),		# absolute physical address
+        }))
+
     return node('device-tree', {
         'compatible': strs('google,blueline', 'xiaomi,sweet', 'qcom,sdm845', 'AppleARM'),
         'model': strs('Pixel3,1'),
         'manufacturer': strs('Google'),
         '#address-cells': u32(2),
         '#size-cells': u32(2),
-    }, [chosen, defaults, cpus_node, arm_io, fbcon])
+    }, [chosen, defaults, cpus_node, arm_io, fbcon] + storage)
 
 
 if __name__ == '__main__':
@@ -129,11 +140,14 @@ if __name__ == '__main__':
     ap.add_argument('out')
     ap.add_argument('--qemu', action='store_true', help="QEMU virt's GIC and timer")
     ap.add_argument('--cpus', type=int, default=1, help='CPU nodes (default 1)')
+    ap.add_argument('--ufs', action='store_true', help='add the UFS host (root on userdata)')
     ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
     if not 1 <= a.cpus <= 8 or (a.qemu and a.cpus != 1):
         sys.exit('--cpus: 1..8 on the phone, 1 in QEMU')
-    root = build(a.qemu, a.cpus)
+    if a.qemu and a.ufs:
+        sys.exit('--ufs: QEMU virt has no UFS host')
+    root = build(a.qemu, a.cpus, ufs=a.ufs)
     blob = serialize(root)
     open(a.out, 'wb').write(blob)
     if a.dump:
