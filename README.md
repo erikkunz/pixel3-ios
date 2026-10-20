@@ -252,6 +252,21 @@ redistributor, so suspect: the virtual timer interrupt on secondary cores
 not arriving (timed wakeups on those cores lost). Test: same kernel with
 `cpus=1` and `cpus=4` (Silver only).
 
+**Hardware is fine; the stall is in software (probe, 2026-10-21).** The
+probe now starts all 8 cores: every core's CNTPCT-CNTVCT is 0-1 tick (no
+per-core offset from the hypervisor), and with the GIC set up as XNU does,
+a 10 ms virtual timer wakes every core from WFI with INTID 19 pending.
+
+**Kernel 0103 (per-CPU stats every 5 s) boots fast to the Apple logo** on
+8 cores with the console muted (1125x2436 frames, so 0061 works). The
+periodic stats thread seems to mask the lost wakeups. After ~9 min all
+cores had taken 25k-107k timer interrupts and 10k-28k IPIs. backboardd
+presented 4 frames (the logo). Symbolicated against the root image's
+shared cache (`ipsw dyld a2s CACHE ADDR --slide 0x4705c000`), SpringBoard's
+main thread waits in `_LSContextInitCommon` (LaunchServices database lock)
+from Control Center's `CCSModuleRepository` app lookup: lsd builds the
+LaunchServices database on first boot. Next: more time, sample lsd.
+
 Root image tools (ours; which iOS details matter is from ios-sweet's notes):
 
 | Tool | What |
