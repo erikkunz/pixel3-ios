@@ -190,6 +190,32 @@ the display needs nothing beyond copying into ABL's framebuffer. There is
 no root disk yet, so this is the expected end. Hold Power + Volume Down to
 get back to fastboot.
 
+## Step 3: iOS root on userdata (in progress)
+
+The user approved (2026-10-21) erasing LineageOS's `userdata` for the iOS
+root; every flash is still confirmed separately. Nothing else on the phone
+is touched.
+
+| What | Value |
+| --- | --- |
+| `userdata` | `sda21` = UFS LUN 0, `0xCE4FFB000` bytes (51.6 GiB), fastboot type `raw` |
+| Kernel | ios-sweet 0001-0059 + ours (CI run 39506022755): UFS root driver (writes only with `ufsrw=1`), AMFI/sandbox/keystore/watchdog stand-ins, IOSurface + framebuffer services, HID services, iPhone identity. 0060+ drive sweet-only keys/touch/regulators/USB and stay out |
+| ADT | `mkadt.py --ufs` adds the UFS host; `--iphone DeviceTree.d22ap.im4p` the iPhone X identity and `/product` |
+
+**Read-only UFS test (2026-10-21), passed.** `rd=ufsroot0` without
+`ufsrw`: the kernel took over the UFS host ABL left running, found
+`userdata` in LUN 0's GPT, attached it as `ufsroot0` and read the HFS+
+header block: "unknown Volume Signature : 394f" (LineageOS's encrypted
+data), then retried the mount in a loop. No write possible in this mode.
+
+Root image tools (ours; which iOS details matter is from ios-sweet's notes):
+
+| Tool | What |
+| --- | --- |
+| `tools/mkiosroot.sh` | macOS: mounts the IPSW's OS, SystemOS and AppOS APFS images (owners on), builds a raw 16 GiB case-sensitive journaled HFS+ image with `newfs_hfs`, copies them decompressed with `rsync -aH` as root, links the shared cache and cryptex files, creates logd stores and the system keybag, runs the tweaks. Needs `sudo` |
+| `tools/iosroot-tweaks.py` | No crash panics, no CommCenter, containers, migration done, Setup skipped, audio/media crash paths off, activation data ark |
+| `tools/img2simg.py` | Raw image -> Android sparse image (zero blocks as DONT_CARE) for `fastboot flash userdata` |
+
 ## Pixel 3 facts used here
 
 | What | Value | Source |

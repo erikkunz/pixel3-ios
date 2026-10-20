@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apple Device Tree (ADT): build, serialize, parse and print.
 
-  adt.py dump FILE.adt
+  adt.py dump FILE         FILE = raw ADT, or an IM4P (e.g. DeviceTree.d22ap.im4p)
 
 The flattened form iBoot hands to XNU, little endian:
   node     = u32 n_props, u32 n_children, prop[n_props], node[n_children]
@@ -91,6 +91,52 @@ def parse(buf, off=0):
     return node, off
 
 
+def _der(buf, off):
+    """(tag, start, end) of the DER element at off."""
+    tag, n = buf[off], buf[off + 1]
+    off += 2
+    if n & 0x80:
+        size = int.from_bytes(buf[off:off + (n & 0x7f)], 'big')
+        off += n & 0x7f
+    else:
+        size = n
+    return tag, off, off + size
+
+
+def _lzfse_decode(data):
+    """Decode an LZFSE ("bvx2") stream with macOS's libcompression."""
+    import ctypes
+    import ctypes.util
+    lib = ctypes.CDLL(ctypes.util.find_library('compression'))
+    fn = lib.compression_decode_buffer
+    fn.restype = ctypes.c_size_t
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+                   ctypes.c_void_p, ctypes.c_int]
+    cap = max(1 << 20, 32 * len(data))
+    dst = ctypes.create_string_buffer(cap)
+    n = fn(dst, cap, data, len(data), None, 0x801)	# COMPRESSION_LZFSE
+    if not n or n == cap:
+        raise ValueError('LZFSE decode failed')
+    return dst.raw[:n]
+
+
+def load(path):
+    """ADT bytes from a raw ADT file or an (unencrypted) IM4P wrapper."""
+    buf = open(path, 'rb').read()
+    if buf[:1] != b'\x30' or b'IM4P' not in buf[:16]:
+        return buf
+    tag, off, end = _der(buf, 0)
+    items = []
+    while off < end:
+        t, vs, ve = _der(buf, off)
+        items.append((t, buf[vs:ve]))
+        off = ve
+    if items[0][1] != b'IM4P' or any(t == 0x04 for t, _ in items[4:]):
+        raise ValueError('%s: not an unencrypted IM4P' % path)
+    payload = items[3][1]
+    return _lzfse_decode(payload) if payload[:4] == b'bvx2' else payload
+
+
 def show(val):
     parts = val[:-1].split(b'\0')
     if val.endswith(b'\0') and all(p and all(32 <= b < 127 for b in p) for p in parts):
@@ -113,4 +159,4 @@ def dump(root, out=sys.stdout):
 if __name__ == '__main__':
     if len(sys.argv) != 3 or sys.argv[1] != 'dump':
         sys.exit(__doc__)
-    dump(parse(open(sys.argv[2], 'rb').read())[0])
+    dump(parse(load(sys.argv[2]))[0])

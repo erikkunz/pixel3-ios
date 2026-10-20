@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the Apple Device Tree for XNU on the Pixel 3 (blueline).
 
-  mkadt.py OUT.adt [--qemu] [--cpus N] [--ufs] [--dump]
+  mkadt.py OUT.adt [--qemu] [--cpus N] [--ufs] [--iphone DT.im4p] [--dump]
 
 The kernel is ios-sweet's SWEET machine config, so this provides what
 that boot path reads: /chosen (RAM range, entropy), /cpus, /arm-io/gic,
@@ -16,15 +16,24 @@ Storage only with --ufs: adds /sweet-ufs, the UFS host at 0x1d84000 that
 ios-sweet's root driver uses (rd=ufsroot0; read-only unless the boot-arg
 ufsrw=1 is also given). Without it the kernel cannot reach the phone's UFS.
 
+--iphone presents the board as the iPhone X (iPhone10,3 / D22AP) whose
+iOS 16.7.16 userland runs on it: root identity, the /chosen, /buttons,
+/arm-io/wdt and /arm-io/disp0 properties its daemons read, and /product
+copied from the real D22AP device tree (DeviceTree.d22ap.im4p from the
+IPSW; Apple's file, never stored here). Which properties matter and why is
+from ios-sweet's bring-up notes.
+
 --qemu swaps in QEMU virt's GIC, timer frequency and timer interrupt
 (-M virt,gic-version=3) for emulator tests.
 """
 import argparse
+import hashlib
 import os
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from adt import Node, dump, serialize, strs, u32, u64  # noqa: E402
+from adt import Node, dump, load, parse, serialize, strs, u32, u64  # noqa: E402
 
 # Kernel-managed RAM: above every fixed carve-out in both the mainline and
 # the LineageOS device tree (README, "Second run"), 32 MiB aligned at both
@@ -54,7 +63,21 @@ CPU_HZ = [1766400000] * 4 + [2803200000] * 4
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 
 
-def build(qemu=False, cpus=1, seed=None, ufs=False):
+# --iphone: synthetic ECID (not any real device's), A11 chip id
+ECID = 0x504958454c330001			# 'PIXEL3' + 1
+CHIP_ID = 0x8015
+
+
+def d22ap_product(im4p):
+    """/product of the real D22AP tree, minus iBoot placeholders and bookkeeping."""
+    root, _ = parse(load(im4p))
+    for c in root.children:
+        if c.name == 'product':
+            return [(k, v) for k, v, ph in c.props if not ph and k not in ('name', 'AAPL,phandle')]
+    sys.exit('%s: no /product node' % im4p)
+
+
+def build(qemu=False, cpus=1, seed=None, ufs=False, iphone=None):
     hw = QEMU if qemu else PHONE
     phandles = iter(range(1, 1 << 16))
 
@@ -119,6 +142,62 @@ def build(qemu=False, cpus=1, seed=None, ufs=False):
     # pmap_compute_max_asids() needs /defaults to exist.
     defaults = node('defaults')
 
+    root_props = {
+        'compatible': strs('google,blueline', 'xiaomi,sweet', 'qcom,sdm845', 'AppleARM'),
+        'model': strs('Pixel3,1'),
+        'manufacturer': strs('Google'),
+    }
+    extra = []
+    if iphone:
+        # compatible[0] -> hw.model/hw.target, model -> hw.machine/hw.product.
+        # "xiaomi,sweet" stays: ios-sweet's platform expert matches it.
+        root_props = {
+            'compatible': strs('D22AP', 'iPhone10,3', 'google,blueline', 'xiaomi,sweet',
+                               'qcom,sdm845', 'AppleARM'),
+            'model': strs('iPhone10,3'),
+            'target-type': strs('D22'),
+            'target-sub-type': strs('D22AP'),
+            'manufacturer': strs('Apple Inc.'),
+        }
+        for k, v in {
+            # /sbin/mount -P 1 wants the boot manifest hash; cryptexd wants
+            # the hash method (stand-in values, as a dev board would have).
+            'boot-manifest-hash': hashlib.sha384(b'pixel3 boot manifest').digest(),
+            'crypto-hash-method': strs('sha2-384'),
+            # MobileGestalt: screen scale; IOPlatformUUID comes from these two.
+            'display-scale': u32(3),
+            'unique-chip-id': struct.pack('<Q', ECID),
+            'chip-id': u32(CHIP_ID),
+            # Security status of a dev-fused board: mobileactivationd then
+            # takes its local "Hactivation" path (no Apple servers).
+            'certificate-production-status': u32(0),
+            'effective-production-status-ap': u32(0),
+            'certificate-security-mode': u32(1),
+            'effective-security-mode-sep': u32(1),
+        }.items():
+            chosen.set(k, v)
+        # keybagd: no effaceable storage -> plain-plist system keybag.
+        defaults.set('no-effaceable-storage', u32(1))
+        # watchdogd: no PMU to report boot stages to.
+        arm_io.children.append(node('wdt', {'no-pmu': u32(1)}))
+        # IOMobileFramebuffer counts these; canvas = what iOS draws.
+        arm_io.children.append(node('disp0', {
+            'device_type': strs('display-subsystem'),
+            'compatible': strs('sweet,display'),
+            'canvas-width': u32(FB_W),
+            'canvas-height': u32(FB_H),
+        }))
+        # MobileGestalt HomeButtonType 2: no Home button (gesture UI).
+        extra.append(node('buttons', {
+            'button-names': strs('volup', 'voldown', 'hold'),
+            'home-button-type': u32(2),
+            'opposed-power-vol-buttons': u32(1),
+        }))
+        product = node('product')
+        for k, v in d22ap_product(iphone):
+            product.set(k, v)
+        extra.append(product)
+
     storage = []
     if ufs:
         storage.append(node('sweet-ufs', {
@@ -126,13 +205,8 @@ def build(qemu=False, cpus=1, seed=None, ufs=False):
             'reg': u64(UFS, UFS_SIZE),		# absolute physical address
         }))
 
-    return node('device-tree', {
-        'compatible': strs('google,blueline', 'xiaomi,sweet', 'qcom,sdm845', 'AppleARM'),
-        'model': strs('Pixel3,1'),
-        'manufacturer': strs('Google'),
-        '#address-cells': u32(2),
-        '#size-cells': u32(2),
-    }, [chosen, defaults, cpus_node, arm_io, fbcon] + storage)
+    root_props.update({'#address-cells': u32(2), '#size-cells': u32(2)})
+    return node('device-tree', root_props, [chosen, defaults, cpus_node, arm_io, fbcon] + extra + storage)
 
 
 if __name__ == '__main__':
@@ -141,13 +215,14 @@ if __name__ == '__main__':
     ap.add_argument('--qemu', action='store_true', help="QEMU virt's GIC and timer")
     ap.add_argument('--cpus', type=int, default=1, help='CPU nodes (default 1)')
     ap.add_argument('--ufs', action='store_true', help='add the UFS host (root on userdata)')
+    ap.add_argument('--iphone', metavar='DT.im4p', help='iPhone X identity, /product from this tree')
     ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
     if not 1 <= a.cpus <= 8 or (a.qemu and a.cpus != 1):
         sys.exit('--cpus: 1..8 on the phone, 1 in QEMU')
     if a.qemu and a.ufs:
         sys.exit('--ufs: QEMU virt has no UFS host')
-    root = build(a.qemu, a.cpus, ufs=a.ufs)
+    root = build(a.qemu, a.cpus, ufs=a.ufs, iphone=a.iphone)
     blob = serialize(root)
     open(a.out, 'wb').write(blob)
     if a.dump:
