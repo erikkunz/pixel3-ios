@@ -1,0 +1,113 @@
+name: xnu
+
+# XNU for the Pixel 3: ios-sweet's SWEET kernel (patches fetched from
+# dipa-studio/ios-sweet at a pinned commit, not stored here) plus our own
+# xnu/patches/*.patch on top. Built with blacktop/darwin-xnu-build like
+# ios-sweet does.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_config:
+        description: RELEASE / DEVELOPMENT / DEBUG
+        default: DEVELOPMENT
+  push:
+    branches: [master]
+    paths:
+      - "xnu/**"
+      - ".github/workflows/xnu.yml"
+
+concurrency:
+  group: xnu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+  DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+  SWEET_REPO: https://github.com/dipa-studio/ios-sweet
+  SWEET_SHA: 4c7cc91ea672b3ec539ad1d45f5c96784aa43f25
+  # ios-sweet patches used: 0001..SWEET_LAST. 0028 and later add the UFS
+  # root and writes to userdata; they stay out until we choose to add them.
+  SWEET_LAST: "0027"
+  MACOS_VERSION: "13.5"			# xnu-8796.141.3, the iOS 16 generation
+  KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
+  MACHINE_CONFIG: SWEET
+
+jobs:
+  build:
+    # macos-14 still ships Xcode 15.x, whose iig matches xnu-8796's IORPC ABI
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch build script and patches
+        run: |
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+          git init -q sweet
+          git -C sweet fetch -q --depth 1 "$SWEET_REPO" "$SWEET_SHA"
+          git -C sweet checkout -q FETCH_HEAD
+          : > patch-list.txt
+          for f in sweet/xnu/patches/*; do
+            n=$(basename "$f"); num=${n%%-*}
+            if [ "$num" \> "$SWEET_LAST" ]; then continue; fi
+            cp "$f" dxb/patches/
+            case $n in *.patch) echo "$n" >> patch-list.txt ;; esac
+          done
+          for f in xnu/patches/*.patch; do
+            cp "$f" dxb/patches/
+            basename "$f" >> patch-list.txt
+          done
+          # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
+          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          ls dxb/patches
+          cat patch-list.txt
+
+      - name: Deps
+        run: |
+          brew install jq gum bash cmake ninja
+          # build.sh only checks that xcodes exists (Xcode is preinstalled)
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Build
+        working-directory: dxb
+        run: bash build.sh 2>&1 | tee ../build.log; exit "${PIPESTATUS[0]}"
+
+      - name: Check that every patch was applied
+        run: |
+          # build.sh skips a patch that does not apply, with only a warning
+          missing=0
+          while read -r p; do
+            grep -q "Applying patch: .*/$p" build.log || { echo "NOT APPLIED: $p"; missing=1; }
+          done < patch-list.txt
+          exit $missing
+
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          cp patch-list.txt out/
+          (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-kernel
+          path: out/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-build-log
+          path: build.log

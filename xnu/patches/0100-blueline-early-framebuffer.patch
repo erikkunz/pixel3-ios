@@ -1,0 +1,55 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 777aca4..87b687f 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -465,7 +465,8 @@ LEXT(start_first_cpu)
+ 
+ #if defined(SWEET)
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	/* Pixel 3: 1080x2160 splash at 0x9d400000, band on the last 32 lines. */
++	MOV64	x0, (0x9d400000 + 2128 * 4320)
+ 	mov		w1, #-1
+ 	mov		x2, #32
+ 	mov		x4, #4320
+@@ -636,6 +637,7 @@ Lkernelcache_base_found:
+ 	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+ 	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
+ 	 */
++	/* Pixel 3: the 0x9d400000 splash lies inside this 32MB block too. */
+ 	MOV64	x10, 0x9c000000
+ 	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+ 	orr		x11, x11, x10
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 6928957..cf9aa26 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -11,10 +11,17 @@
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+ 
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
++/*
++ * Pixel 3 (blueline): splash at 0x9d400000, 1080x2160. start.s and
++ * arm_vm_init map the 32MB block at 0x9c000000 that contains it, so the
++ * relocated console adds the offset inside that block.
++ */
++#define EARLY_FB_PA 0x9d400000ULL
++#define EARLY_FB_BLOCK_OFF (EARLY_FB_PA & (0x2000000ULL - 1))	/* 16K granule L2 block */
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)EARLY_FB_PA;
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
++#define EARLY_HEIGHT 2160u
+ #define EARLY_STRIDE (4320u / 4)
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+@@ -129,7 +136,7 @@ void
+ sweet_early_relocate(uint64_t base)
+ {
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
+-	early_fb = (volatile uint32_t *)(uintptr_t)base;
++	early_fb = (volatile uint32_t *)(uintptr_t)(base + EARLY_FB_BLOCK_OFF);
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_mark(9, "kernel framebuffer VA live");
+ }

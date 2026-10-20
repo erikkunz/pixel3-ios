@@ -14,91 +14,17 @@
  * Then it reboots straight back into fastboot.
  */
 #include <stdint.h>
+#include "board.h"
 #include "fb.h"
 #include "fdt.h"
 
-/* Downstream sdm845.dtsi: qcom,msm-imem@146bf000, restart_reason@65c. */
-#define IMEM_RESTART_REASON	0x146bf65cUL
-#define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL	/* qcom,pshold */
-
-#define PSCI_VERSION		0x84000000UL
-#define PSCI_SYSTEM_RESET	0x84000009UL
-#define SMCCC_VERSION		0x80000000UL
-
-#ifdef QEMU	/* emulator test build: PSCI via hvc, short timings, no reset */
+#ifdef QEMU	/* emulator test build: short timings */
 #define ANIM_SECONDS		3
 #define HOLD_SECONDS		2
-#define CALL_INSN		"hvc #0"
 #else
 #define ANIM_SECONDS		30
 #define HOLD_SECONDS		90
-#define CALL_INSN		"smc #0"
 #endif
-
-#define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
-
-/* The compiler may emit calls to these even in freestanding code. */
-void *memset(void *d, int c, unsigned long n)
-{
-	volatile unsigned char *p = d;
-	while (n--)
-		*p++ = (unsigned char)c;
-	return d;
-}
-
-void *memcpy(void *d, const void *s, unsigned long n)
-{
-	volatile unsigned char *dp = d;
-	const volatile unsigned char *sp = s;
-	while (n--)
-		*dp++ = *sp++;
-	return d;
-}
-
-static uint64_t smc(uint64_t fn)
-{
-	register uint64_t x0 __asm__("x0") = fn;
-	__asm__ volatile(CALL_INSN
-			 : "+r"(x0)
-			 :
-			 : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
-			   "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
-	return x0;
-}
-
-static uint64_t now(void)
-{
-	__asm__ volatile("isb" ::: "memory");
-	return rsr("cntpct_el0");
-}
-
-static uint64_t ticks_per_s(void)
-{
-	uint64_t f = rsr("cntfrq_el0");
-	return f ? f : 19200000;	/* SDM845 arch timer runs at 19.2 MHz */
-}
-
-static void delay_s(unsigned s)
-{
-	uint64_t end = now() + ticks_per_s() * s;
-	while (now() < end)
-		;
-}
-
-static void __attribute__((noreturn)) reboot_to_fastboot(void)
-{
-#ifdef QEMU
-	for (;;)
-		__asm__ volatile("wfe");
-#endif
-	*(volatile uint32_t *)IMEM_RESTART_REASON = RESTART_BOOTLOADER;
-	__asm__ volatile("dsb sy" ::: "memory");
-	smc(PSCI_SYSTEM_RESET);
-	*(volatile uint32_t *)PSHOLD = 0;	/* if PSCI returned */
-	for (;;)
-		__asm__ volatile("wfe");
-}
 
 /* ---- device tree survey ---- */
 
@@ -356,7 +282,7 @@ static void countdown(void)
 	con_at(0, row, "Rebooting to fastboot...                     ", C_GREEN, C_BLACK);
 }
 
-void probe_main(uintptr_t dtb, uintptr_t load)
+void entry_main(uintptr_t dtb, uintptr_t load)
 {
 	con_reset(C_BLACK);
 	con_at(0, 0, "PIXEL 3 PROBE p1   ios-sweet port, step 1", C_GREEN, C_BLACK);

@@ -122,6 +122,46 @@ agree is free, `0xf2a00000`..`0x17e0a0000` (~2.2 GiB). If we need more, or RAM
 below 4 GiB for DMA, `0xa2000000`..`0xf2700000` (~1.3 GiB) is also free; rmtfs
 only matters once something runs the modem.
 
+## Step 2: XNU to its framebuffer console (`p2-shim/`, `tools/`, `xnu/`)
+
+```
+ABL (unlocked, LineageOS bootloader)
+  -> fastboot boot p2-shim/out/shim.img     RAM only, nothing flashed
+     -> shim: checks the live DTB, copies the payload linked into its own image
+        -> XNU (ios-sweet's SWEET kernel + our blueline patch), ADT, boot_args
+```
+
+| Piece | What |
+| --- | --- |
+| `tools/mkadt.py` | Apple Device Tree for blueline: RAM `0xf4000000`+`0x8a000000`, GIC, timer INTID 19, `sweet-fbcon` at `0x9d400000` 1080×2160, one CPU. No storage node, so the kernel cannot touch UFS. `--qemu` swaps in QEMU virt's GIC/timer |
+| `tools/mkpayload.py` | Kernel Mach-O + ADT + boot-args into one payload; applies the kernel's chained fixups (nothing else would) |
+| `tools/adt.py` | ADT serializer/parser, `adt.py dump X.adt` |
+| `p2-shim/` | The loader. The payload is linked into the shim's Image, which ABL unpacks at `0x80080000` with ~68 MiB free below the DTB, so the ramdisk's 16 MiB gap below `hyp` at `0x85700000` does not matter. Before copying, it refuses kernel RAM that is outside `/memory`, overlaps a fixed `/reserved-memory` region, the framebuffer, itself or the DTB. Then a 3 s pause (photo the screen), copy, jump with MMU off, `x0` = boot_args |
+| `xnu/patches/` | Our XNU patches, applied after ios-sweet's. `0100-blueline-early-framebuffer.patch`: the early debug console uses the blueline framebuffer (same 32 MiB block at `0x9c000000` as sweet's, so the mappings stay) |
+| `.github/workflows/xnu.yml` | Kernel build on GitHub's macOS 14 runners: blacktop/darwin-xnu-build, xnu-8796.141.3, ios-sweet patches 0001-0027 fetched at a pinned commit, then ours. Fails if any patch was skipped |
+| `common/` | Entry code, framebuffer console, FDT walker, PSCI/reboot and build steps shared by probe and shim |
+
+Only ios-sweet patches up to 0027 (RAM-disk root) are used. 0028 and later
+add the UFS root device and writes to `userdata`, which on this phone is
+LineageOS's data; they come in only as a deliberate later step.
+
+### Build and run
+
+```sh
+gh workflow run xnu.yml                          # or push a change under xnu/
+gh run download RUN_ID -n xnu-kernel -D xnu/out
+python3 tools/mkadt.py p2-shim/out/blueline.adt
+python3 tools/mkpayload.py xnu/out/kernel.development.sweet p2-shim/out/blueline.adt \
+    p2-shim/out/payload.bin --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam'
+p2-shim/build.sh p2-shim/out/payload.bin stock/boot.img
+fastboot boot p2-shim/out/shim.img
+```
+
+QEMU check of the whole loader path with a stand-in kernel
+(`p2-shim/test/testkernel.c`, an arm64 Mach-O with chained fixups):
+`p2-shim/test/run-qemu.sh` must print `screen: GREEN (pass)`. Status
+2026-10-20: passes, and fails as it should with a wrong cmdline.
+
 ## Pixel 3 facts used here
 
 | What | Value | Source |
@@ -138,6 +178,10 @@ only matters once something runs the modem.
 
 ## Licensing note
 
-ios-sweet has no license file, so its code isn't copied here; this probe is
-written from scratch. Ask its author before publishing a fork that reuses
-their patches.
+ios-sweet has no license file, so its code isn't copied here. The probe,
+shim, ADT and payload tools are written from scratch (the ADT and boot_args
+layouts are Apple's formats; the payload/ADT values follow from the
+hardware). The kernel build fetches ios-sweet's XNU patches from their
+repository at build time and never stores them here; `xnu/patches/` holds
+only our own changes on top. Ask the author before publishing kernels or a
+fork that reuses their patches.

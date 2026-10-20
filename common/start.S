@@ -1,5 +1,5 @@
 /*
- * Pixel 3 (blueline) probe: entry point.
+ * Pixel 3 (blueline) bare-metal programs: entry point.
  *
  * The file starts with an arm64 Linux Image header so the Pixel 3
  * bootloader (ABL) loads and enters it like a kernel: EL1, MMU and
@@ -43,7 +43,7 @@ _start:
 	b	1b
 2:	mov	x0, x19
 	adr	x1, _head		/* where ABL put us */
-	bl	probe_main
+	bl	entry_main
 3:	wfe
 	b	3b
 

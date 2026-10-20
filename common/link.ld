@@ -5,6 +5,9 @@ SECTIONS
 	.text : { *(.text.head) *(.text*) }
 	.rodata : { *(.rodata*) }
 	.data : { *(.data*) }
+	/* Optional blob linked into the image (the shim's XNU payload). */
+	. = ALIGN(16);
+	.payload : { _payload_start = .; KEEP(*(.payload)) _payload_end = .; }
 	. = ALIGN(16);
 	_bss_start = .;
 	.bss : { *(.bss*) *(COMMON) }
