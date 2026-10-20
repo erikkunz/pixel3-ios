@@ -36,7 +36,7 @@ work=$(mktemp -d "$(dirname "$out")/.iosroot.XXXXXX")
 devs=()
 cleanup() {
 	for m in "$work"/root "$work"/os "$work"/sysos "$work"/appos; do
-		mount | grep -q " on $m " && umount "$m" 2>/dev/null || true
+		mount | grep -F " on $m (" >/dev/null && umount "$m" 2>/dev/null || true	# not grep -q: SIGPIPE + pipefail
 	done
 	for d in ${devs[@]+"${devs[@]}"}; do hdiutil detach -quiet "$d" 2>/dev/null || true; done
 	rmdir "$work"/* "$work" 2>/dev/null || true
@@ -115,4 +115,6 @@ df -h "$root"
 sync
 umount "$root"
 fsck_hfs -fn "$dev"
+# Hand the image to whoever ran sudo (it was created by root).
+[[ -n ${SUDO_USER:-} ]] && chown "$SUDO_USER" "$out" && chmod 0644 "$out"
 echo "done: $out"

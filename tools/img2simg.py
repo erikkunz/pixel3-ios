@@ -3,20 +3,23 @@
 
   img2simg.py RAW.img OUT.simg [--block 4096]
 
-All-zero blocks become DONT_CARE chunks, so a mostly empty 16 GiB volume
-sends and writes only what it holds. Note that DONT_CARE leaves whatever
-was on the partition there; HFS+ only reads blocks its own structures
-point at, so old data under free space does no harm.
+All-zero blocks become FILL chunks with value 0: the device writes the
+zeros itself, so a mostly empty 16 GiB volume transfers only what it holds.
+Never DONT_CARE: that keeps whatever the partition held before, and zero
+blocks inside files (padding, zeroed pages) would then read back as the
+old data. That is what broke the first flash (launchd failed its code
+signature page check and crashed).
 
 Format (libsparse): 28-byte header, then chunks with a 12-byte header:
-RAW (0xCAC1) followed by its blocks, DONT_CARE (0xCAC3) with no data.
+RAW (0xCAC1) followed by its blocks, FILL (0xCAC2) followed by a 4-byte
+fill value.
 """
 import argparse
 import os
 import struct
 import sys
 
-RAW, DONT_CARE = 0xCAC1, 0xCAC3
+RAW, FILL = 0xCAC1, 0xCAC2
 
 
 def convert(src, dst, bs):
@@ -34,7 +37,7 @@ def convert(src, dst, bs):
             nonlocal chunks, run_data, run_len
             if not run_len:
                 return
-            data = b''.join(run_data)
+            data = b''.join(run_data) if run_kind == RAW else bytes(4)	# FILL value 0
             out.write(struct.pack('<HHII', run_kind, 0, run_len, 12 + len(data)))
             out.write(data)
             chunks += 1
@@ -42,7 +45,7 @@ def convert(src, dst, bs):
 
         for _ in range(total):
             b = f.read(bs)
-            kind = DONT_CARE if b == zero else RAW
+            kind = FILL if b == zero else RAW
             # Keep RAW chunks well below fastboot's download size.
             if kind != run_kind or (kind == RAW and run_len >= 16384):
                 flush()

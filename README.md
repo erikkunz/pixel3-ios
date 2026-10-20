@@ -208,6 +208,17 @@ is touched.
 header block: "unknown Volume Signature : 394f" (LineageOS's encrypted
 data), then retried the mount in a loop. No write possible in this mode.
 
+**First flash and boot (2026-10-21).** `fastboot flash userdata` (sparse,
+45 x 256 MiB; this ABL's max-download-size is `0x10000000`, so no `-S 512M`)
+took 334 s. Boot with `--ufs --iphone`, `rd=ufsroot0 ufsrw=1 rootrw=1
+launchd_unsecure_cache=1 ignition_level=1 unentitled_ios_sim_launch=1 ...`:
+UFS read-write, persistent log at the last 4100 KiB, **HFS+ root mounted**,
+`/sbin/launchd` executed, libignition started, then `cs_invalid_page` on a
+launchd page and pid 1 died of SIGSEGV -> "initproc failed to start".
+Cause: our `img2simg.py` wrote all-zero blocks as DONT_CARE, so zero blocks
+inside files kept LineageOS's old bytes. Fixed (FILL chunks with value 0);
+reflash needed.
+
 Root image tools (ours; which iOS details matter is from ios-sweet's notes):
 
 | Tool | What |
