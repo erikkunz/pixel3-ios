@@ -31,6 +31,9 @@ env:
   # and framebuffer services, HID services, iPhone identity. 0060 and later
   # drive sweet's own keys, touch, regulators and USB; not for blueline as is.
   SWEET_LAST: "0059"
+  # Later ios-sweet patches taken individually: 0065 = SMP via PSCI CPU_ON
+  # (our 0101 lifts its six-core A55 limit to the Pixel 3's eight cores).
+  SWEET_EXTRA: "0065"
   MACOS_VERSION: "13.5"			# xnu-8796.141.3, the iOS 16 generation
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: SWEET
@@ -54,7 +57,7 @@ jobs:
           : > patch-list.txt
           for f in sweet/xnu/patches/*; do
             n=$(basename "$f"); num=${n%%-*}
-            if [ "$num" \> "$SWEET_LAST" ]; then continue; fi
+            if [ "$num" \> "$SWEET_LAST" ] && ! echo " $SWEET_EXTRA " | grep -q " $num "; then continue; fi
             cp "$f" dxb/patches/
             case $n in *.patch) echo "$n" >> patch-list.txt ;; esac
           done
