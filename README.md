@@ -177,10 +177,18 @@ newest line `SWEET CPU: boot CPU 0 registered, SGI1 verified,
 initialization complete` (so the GIC delivers a self-IPI). The early
 marker band at the bottom is drawn too.
 
-In QEMU the same kernel continues with ktriage, SWEET HFS, mcache/mbinit,
-DLIL and Skywalk self-tests; on the phone the photo ends at the SWEET CPU
-line. Whether it stopped there or the photo was early: second photo
-pending.
+A later photo shows it kept going exactly as in QEMU: ktriage, SWEET HFS,
+mcache/mbinit (64 MB pool), DLIL SUM16 self-tests, Skywalk self-tests (all
+PASSED), lo0/gif0/stf0 attached, then `!BSD` and
+
+    Waiting on <dict ...><key>IOProviderClass</key><string>IOMedia</string>
+    <key>Content</key><string>Apple_HFS</string></dict>
+
+**Step 2 is done: XNU boots on the Pixel 3 to "waiting for root device".**
+Scheduler, timer interrupts (kernel threads get scheduled) and the GIC work;
+the display needs nothing beyond copying into ABL's framebuffer. There is
+no root disk yet, so this is the expected end. Hold Power + Volume Down to
+get back to fastboot.
 
 ## Pixel 3 facts used here
 
