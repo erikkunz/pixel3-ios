@@ -225,7 +225,26 @@ Root image tools (ours; which iOS details matter is from ios-sweet's notes):
 | --- | --- |
 | `tools/mkiosroot.sh` | macOS: mounts the IPSW's OS, SystemOS and AppOS APFS images (owners on), builds a raw 16 GiB case-sensitive journaled HFS+ image with `newfs_hfs`, copies them decompressed with `rsync -aH` as root, links the shared cache and cryptex files, creates logd stores and the system keybag, runs the tweaks. Needs `sudo` |
 | `tools/iosroot-tweaks.py` | No crash panics, no CommCenter, containers, migration done, Setup skipped, audio/media crash paths off, activation data ark |
-| `tools/img2simg.py` | Raw image -> Android sparse image (zero blocks as DONT_CARE) for `fastboot flash userdata` |
+| `tools/img2simg.py` | Raw image -> Android sparse image for `fastboot flash userdata` (zero blocks as FILL 0) |
+| `tools/simgdiff.py` | Sparse image of only the blocks where a new image differs from the flashed one: a change flashes in seconds |
+| `tools/rootimg.sh` | `sudo` mount/umount of a raw root image on the Mac to change files (owners kept) |
+| `tools/phone.sh` | From LineageOS recovery (adb root): `log` pulls the kernel's persistent console log, `sync BASE.img` copies the 4 MiB pieces that differ from the phone into BASE so it is a valid diff base again |
+| `tools/phonelog.py` | Decodes that log ring ("SWEETLOG" header + 4 MiB ring at the end of userdata) |
+
+Changing the root without a full reflash (iOS writes to the volume when
+booted with `rootrw=1`, so the base must be synced from the phone first):
+
+```sh
+fastboot reboot recovery                       # then Advanced -> Enable ADB
+tools/phone.sh log                             # -> work/phone-log.txt
+tools/phone.sh sync work/ios-root.img
+cp -c work/ios-root.img work/ios-root-new.img
+sudo tools/rootimg.sh mount work/ios-root-new.img   # edit under work/root
+sudo tools/rootimg.sh umount
+tools/simgdiff.py work/ios-root.img work/ios-root-new.img work/diff.simg
+adb reboot bootloader && fastboot flash userdata work/diff.simg
+mv work/ios-root-new.img work/ios-root.img
+```
 
 ## Pixel 3 facts used here
 
