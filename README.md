@@ -340,6 +340,15 @@ the chip powered and sensing (supplies `vdd`/`avdd`, reset GPIO 99, and
 `st,switch_gpio` 136, which routes the touch bus to the AP or the SLPI
 sensor hub)?
 
+Probe runs (2026-10-21 evening): SE2 clocks on (s2 CBCR `0x4220`, wrapper
+core `0x1700c`/`0x17010` on), firmware is I2C (`0x300`), writes stick (SCL
+readback = written value), `GENI_CGC_CTRL`/`OUTPUT_CTRL`/`FORCE_DEFAULT`
+and `M_IRQ_EN` set, reset GPIO 99 high, switch GPIO 136 low. But an I2C
+command never starts: GENI status and M_IRQ_STATUS stay 0 (no done, no
+NACK). Next suspect: FIFO interface disabled for this SE
+(`SE_GENI_IF_DISABLE_RO` 0x064, as Linux checks), which would mean GPI DMA.
+Volume up: GPIO 6 STATUS1 reads `0x81` released and pressed alike.
+
 ### Wi-Fi: what it would take (research, nothing built)
 
 The Pixel 3's Wi-Fi is the WCN3990 on SDM845's SNOC bus (Linux `ath10k_snoc`).

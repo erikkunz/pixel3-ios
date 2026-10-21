@@ -251,6 +251,14 @@ static void show_touch_bus(void)
 	p = fmt_str(p, " s2 cbcr=");
 	fmt_hex(p, rd32(GCC_S2_CBCR), 8);
 	con_line("I2C", buf);
+	/* Wrapper 0 core clocks (CBCR bit 31 = off): shown, then voted (bits 8, 9). */
+	p = fmt_str(buf, "core cbcr 0x1700c=");
+	p = fmt_hex(p, rd32(GCC + 0x1700c), 8);
+	p = fmt_str(p, " 0x17010=");
+	fmt_hex(p, rd32(GCC + 0x17010), 8);
+	con_line("", buf);
+	w32(GCC_VOTE, rd32(GCC_VOTE) | (1U << 8) | (1U << 9));
+	spin_us(100);
 	uint32_t fw = rd32(SE + SE_FW_REV);
 	p = fmt_str(buf, "se fw=");
 	p = fmt_hex(p, fw, 8);
@@ -268,6 +276,10 @@ static void show_touch_bus(void)
 	if ((fw >> 8 & 0xff) != 3)
 		return;
 
+	/* geni_se_io_init: internal clock gating on, outputs enabled, defaults. */
+	w32(SE + 0x028, rd32(SE + 0x028) | 0x7fU);	/* GENI_CGC_CTRL */
+	w32(SE + 0x024, 0x7fU);				/* GENI_OUTPUT_CTRL */
+	w32(SE + 0x020, 1U);				/* GENI_FORCE_DEFAULT_REG */
 	/* FIFO mode, byte packing (first byte in bits 7:0), 400 kHz from 19.2 MHz. */
 	w32(SE + SE_DMA_MODE, 0);
 	w32(SE + SE_TX_PACK0, 0x0004380eU);
@@ -277,10 +289,19 @@ static void show_touch_bus(void)
 	w32(SE + SE_CLK_SEL, 0);
 	w32(SE + SE_M_CLK_CFG, (2U << 4) | 1U);
 	w32(SE + SE_I2C_SCL, (5U << 20) | (12U << 10) | 24U);
+	w32(SE + 0x614, M_CMD_DONE | M_ERRORS);		/* M_IRQ_EN: let status latch */
+	w32(SE + 0xe1c, rd32(SE + 0xe1c) | 7U);		/* SE_IRQ_EN: M, S, DMA */
 
 	/* Chip ID: 0xFA + hw address 0x20000000, one dummy byte first. */
 	static const uint8_t id_cmd[5] = { 0xfa, 0x20, 0x00, 0x00, 0x00 };
 	uint8_t id[4] = { 0 };
+	p = fmt_str(buf, "geni st=");
+	p = fmt_hex(p, rd32(SE + 0x040), 8);
+	p = fmt_str(p, " scl rb=");
+	p = fmt_hex(p, rd32(SE + SE_I2C_SCL), 8);	/* = 0x00503018 when writes stick */
+	p = fmt_str(p, " irqen=");
+	fmt_hex(p, rd32(SE + 0x614), 4);
+	con_line("", buf);
 	int rc = fts_read(id_cmd, sizeof(id_cmd), id, sizeof(id));
 	p = fmt_str(buf, rc ? "chip id read failed rc=" : "chip id ");
 	if (rc) {
