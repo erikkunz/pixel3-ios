@@ -267,6 +267,15 @@ main thread waits in `_LSContextInitCommon` (LaunchServices database lock)
 from Control Center's `CCSModuleRepository` app lookup: lsd builds the
 LaunchServices database on first boot. Next: more time, sample lsd.
 
+**8 cores, migration boot (2026-10-21 02:20): stuck again.** Stopped at
+`exec seputil` like the first 8-core boot, and the log ends at t=223 s. The
+per-CPU stats show the Gold cores (cpu4-7) never took an IPI or a timer
+interrupt after start-up (counts 1/1), while cpu0-3 were busy. In the
+earlier 0103 run they did get thousands later, so it is intermittent:
+something in how cores hand work to each other. Probe tests so far only
+cover self-SGIs, not one core waking another. Back to `cpus=1` for the
+migration run (19:36); SMP debugging is a separate track.
+
 Root image tools (ours; which iOS details matter is from ios-sweet's notes):
 
 | Tool | What |
