@@ -404,6 +404,18 @@ the controller state only, `sweetusb=2` starts the USB device; then on the
 Mac `tools/usblog.sh` finds the adapter (host MAC `02:00:5e:77:ee:01`), sets
 `192.168.7.1/24` (sudo) and prints/saves the console (UDP 5140) live.
 
+First run (2026-10-22, `sweetusb=2`): controller found and powered, `ue0
+192.168.7.2/24` up, soft reset fine, then `ep0 cmd 0x1 timeout` (SETEPCONFIG)
+-> no enumeration. ABL had run fastboot at **SuperSpeed** (`DSTS` speed 4,
+QMP USB3 PHY; sweet's ABL used USB 2), and the driver's clock table has
+SM7150 offsets (SDM845: master `0xf00c`, sleep `0xf010`, mock UTMI `0xf014`,
+aux `0xf04c`). `0110-blueline-usb-superspeed-phy.patch`: let the USB3 PHY
+suspend (`GUSB3PIPECTL` bit 17, as Linux does for a high-speed-only DWC3;
+`blueusb3susp=0` skips), optional `blueusbreset=0` (no soft reset), 20 ms
+command timeout, SDM845 clock/PHY diagnostics.
+Also from that log: 0106 found the Silver cluster already at its top level
+(17 = 1766 MHz); the Gold cluster's cpufreq controller reports "not enabled".
+
 ### Volume up (prepared, needs one PMIC write)
 
 GPIO 6 is an enabled input but has no pull-up, so the key changes nothing
