@@ -330,6 +330,42 @@ removed, `/private/var/datamigrator/migrate` sentinel), `simgdiff` = 101
 blocks / 404 KB, flashed in 0.5 s. `iosroot-tweaks.py` no longer skips the
 migration.
 
+Touch: `p3-input` now also enables GENI I2C on QUP wrapper 0 / SE2
+(`0x888000`; clocks from `gcc-sdm845.c`: vote `0x5200c` bits 6/7/12, SE2
+RCG `0x17294` on the 19.2 MHz crystal; SDA/SCL GPIO 27/28 = `qup2`), reads
+the FTS chip ID (`0xFA 20 00 00 00`) and shows FIFO events (`0x86`) while
+the screen is tapped. Not run yet. Kernel `0105-blueline-touch.patch` is
+the same as a polled driver, off unless `bluetouch=1`. Open question: is
+the chip powered and sensing (supplies `vdd`/`avdd`, reset GPIO 99, and
+`st,switch_gpio` 136, which routes the touch bus to the AP or the SLPI
+sensor hub)?
+
+### Wi-Fi: what it would take (research, nothing built)
+
+The Pixel 3's Wi-Fi is the WCN3990 on SDM845's SNOC bus (Linux `ath10k_snoc`).
+Unlike a self-contained PCIe/SDIO chip it needs, in order:
+1. **The modem DSP running**: WLAN firmware is loaded and managed through
+   the modem subsystem (MPSS). That means remoteproc bring-up through
+   TrustZone's PAS (peripheral authentication: signed `modem.mdt`/`.bNN`
+   from the vendor/modem partition, `qcom,msa` memory), plus the
+   `wlan_msa_mem` carve-out.
+2. **QMI over QRTR over GLINK/SMEM** to talk to the WLAN firmware service
+   (`wlfw`) and switch the firmware into mission mode.
+3. **The ath10k data path**: copy engines on SNOC, the WCN3990 IRQs, SMMU
+   context for its DMA.
+4. **The iOS side**: iOS's `wifid` expects Apple's IO80211 family with
+   Apple's Broadcom driver interface; there is no generic Wi-Fi driver to
+   plug a Qualcomm chip into. Scanning/association UI would need a large
+   IO80211-compatible implementation.
+
+Each of 1-3 is its own driver project on XNU, and 4 is the hardest. ios-sweet
+lists Wi-Fi as its own next big item with no code yet. **The realistic way
+to get networking first is USB**: ios-sweet's 0072-0077 bring up DWC3 USB
+device mode with CDC-ECM (the phone appears as a USB network adapter; sweet
+already pings over it and streams its console log live). SDM845 has DWC3 at
+`0xa600000` like SM7150, with a different PHY (QUSB2 v2 + QMP), so that is a
+much smaller port and would also replace the recovery round-trips for logs.
+
 ## Pixel 3 facts used here
 
 | What | Value | Source |
