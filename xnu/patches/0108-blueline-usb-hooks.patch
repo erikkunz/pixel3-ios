@@ -1,0 +1,70 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 7bcbf60..48696c2 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@ bsd/dev/sweet_sample.c			standard
+ bsd/dev/blueline_keys.c			standard
+ bsd/dev/blueline_touch.c		standard
+ bsd/dev/blueline_cpufreq.c		standard
++bsd/dev/sweet_usb.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 6f28aff..ad3a413 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -50,6 +50,7 @@ extern void sweet_sample_start(void);
+ extern void blueline_keys_init(void);
+ extern void blueline_touch_init(void);
+ extern void blueline_cpufreq_init(void);
++extern void sweet_usb_probe(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -606,6 +607,8 @@ sweet_ufs_init(void)
+ 	blueline_cpufreq_init();
+ 	blueline_keys_init();
+ 	blueline_touch_init();
++	/* USB device mode, CDC-ECM, live console log (sweet_usb.c, boot-arg sweetusb). */
++	sweet_usb_probe();
+ 	return 0;
+ }
+ 
+@@ -644,6 +647,36 @@ sweet_log_append(const char *c, int size)
+ 	}
+ }
+ 
++/*
++ * Copy console bytes [*pos, total) (at most max) for live log streaming
++ * (sweet_usb.c). A reader that fell more than the ring behind skips ahead.
++ * Returns the byte count; *pos advances.
++ */
++uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
++
++uint32_t
++sweet_log_copy(uint64_t *pos, char *out, uint32_t max)
++{
++	uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
++	if (total - *pos > SWEET_LOG_SIZE) {
++		*pos = total - SWEET_LOG_SIZE;
++	}
++	uint32_t n = (uint32_t)MIN((uint64_t)max, total - *pos);
++	for (uint32_t i = 0; i < n; i++) {
++		out[i] = sweet_log_ring[(*pos + i) % SWEET_LOG_SIZE];
++	}
++	*pos += n;
++	return n;
++}
++
++uint64_t sweet_log_position(void);
++
++uint64_t
++sweet_log_position(void)
++{
++	return os_atomic_load(&sweet_log_total, relaxed);
++}
++
+ struct sweet_log_header {
+ 	char magic[8];
+ 	uint32_t version, size;

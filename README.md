@@ -390,6 +390,33 @@ client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
   empty `IOAcceleratorES` (`sweetaccel=0` off). Candidate for the
   `usermanagerd`/LaunchServices waits.
 
+### USB networking and live log (built, not yet run)
+
+ios-sweet's USB driver (0072-0077, 0081: DWC3 device mode, CDC-ECM network
+adapter, console streamed as UDP) uses only addresses the Pixel 3 shares
+with sweet: DWC3 `0xa600000`, qscratch `0xa6f8800`, QUSB2 v2 PHY `0x88e2000`
+(`qcom,sdm845-qusb2-phy`), GCC `usb30_prim_gdsc` `0xf004`; both ABLs leave
+the controller and PHY initialized from fastboot. CI builds `sweet_usb.c`
+with `xnu/patches/0108-stage-sweet-usb.sh` (fetches ios-sweet at the pinned
+commit, applies only that file) and `0108-blueline-usb-hooks.patch` (build
+entry, start call, log helpers). Boot-args: `sweetusb=1` (default) reports
+the controller state only, `sweetusb=2` starts the USB device; then on the
+Mac `tools/usblog.sh` finds the adapter (host MAC `02:00:5e:77:ee:01`), sets
+`192.168.7.1/24` (sudo) and prints/saves the console (UDP 5140) live.
+
+### Volume up (prepared, needs one PMIC write)
+
+GPIO 6 is an enabled input but has no pull-up, so the key changes nothing
+readable. `p3-input/out/input-volup.img` (built with `-DVOLUP_PULLUP`)
+writes GPIO 6 `DIG_PULL_CTL` (`0xc542`) = 0 (30 uA pull-up, as Linux's
+`bias-pull-up`) via the arbiter's write channel, if the apps EE owns that
+APID, then shows the key live. Only after approval; the kernel driver gets
+the same write behind `bluevolup=1` once the probe shows which status bit
+follows the key.
+
+Touch probe (next run): also shows `SE_GENI_IF_DISABLE_RO` (FIFO disabled
+-> GPI DMA only) and the command/status registers right after a command.
+
 ### Wi-Fi: what it would take (research, nothing built)
 
 The Pixel 3's Wi-Fi is the WCN3990 on SDM845's SNOC bus (Linux `ath10k_snoc`).

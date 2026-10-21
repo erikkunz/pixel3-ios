@@ -69,6 +69,7 @@ jobs:
             cp "$f" dxb/patches/
             case $n in *.patch) echo "$n" >> patch-list.txt ;; esac
           done
+          for f in xnu/patches/*.sh; do cp "$f" dxb/patches/; done
           for f in xnu/patches/*.patch; do
             cp "$f" dxb/patches/
             basename "$f" >> patch-list.txt

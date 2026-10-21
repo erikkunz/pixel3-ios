@@ -295,6 +295,11 @@ static void show_touch_bus(void)
 	/* Chip ID: 0xFA + hw address 0x20000000, one dummy byte first. */
 	static const uint8_t id_cmd[5] = { 0xfa, 0x20, 0x00, 0x00, 0x00 };
 	uint8_t id[4] = { 0 };
+	/* Linux refuses FIFO mode when bit 0 here is set (GPI DMA only). */
+	p = fmt_str(buf, "if_disable=");
+	p = fmt_hex(p, rd32(SE + 0x064), 8);
+	p = fmt_str(p, rd32(SE + 0x064) & 1 ? " FIFO OFF (DMA only)" : " fifo ok");
+	con_line("", buf);
 	p = fmt_str(buf, "geni st=");
 	p = fmt_hex(p, rd32(SE + 0x040), 8);
 	p = fmt_str(p, " scl rb=");
@@ -303,6 +308,13 @@ static void show_touch_bus(void)
 	fmt_hex(p, rd32(SE + 0x614), 4);
 	con_line("", buf);
 	int rc = fts_read(id_cmd, sizeof(id_cmd), id, sizeof(id));
+	p = fmt_str(buf, "after cmd: m_cmd0=");
+	p = fmt_hex(p, rd32(SE + SE_M_CMD0), 8);
+	p = fmt_str(p, " st=");
+	p = fmt_hex(p, rd32(SE + 0x040), 8);
+	p = fmt_str(p, " txcnt=");
+	fmt_hex(p, rd32(SE + SE_TX_FIFO + 0x100) & 0xfffffff, 4);	/* TX_FIFO_STATUS 0x800 */
+	con_line("", buf);
 	p = fmt_str(buf, rc ? "chip id read failed rc=" : "chip id ");
 	if (rc) {
 		p = fmt_dec(p, (uint64_t)(-rc));
@@ -395,6 +407,34 @@ static int spmi_read(uint16_t apid, uint16_t addr, uint8_t *out)
 	return 0;
 }
 
+#ifdef VOLUP_PULLUP
+/*
+ * The one PMIC write, only in the -DVOLUP_PULLUP build (input-volup.img):
+ * GPIO 6 DIG_PULL_CTL (0xc542) = 0, a 30 uA pull-up, as Linux configures it
+ * for the volume-up key (pinctrl-spmi-gpio, bias-pull-up). EXT_WRITEL
+ * (opcode 0) on this EE's read/write channel ("chnls", 0x10000 per APID),
+ * only if the apps EE owns that APID.
+ */
+#define ARB_CHNLS	0x0c600000UL
+static int spmi_write(uint16_t apid, uint16_t addr, uint8_t val)
+{
+	if (apid == NO_APID || (rd32(ARB_CNFG + 0x700 + 4UL * apid) & 7) != 0)
+		return 0;
+	uintptr_t ch = ARB_CHNLS + 0x10000UL * apid;
+	*(volatile uint32_t *)(ch + 0x10) = val;			/* WDATA0 */
+	__asm__ volatile("dsb osh" ::: "memory");
+	*(volatile uint32_t *)ch = ((uint32_t)(addr & 0xff) << 4);	/* EXT_WRITEL, 1 byte */
+	__asm__ volatile("dsb osh" ::: "memory");
+	uint64_t end = now() + ticks_per_s() / 100;
+	while (now() < end) {
+		last_status = rd32(ch + 0x08);
+		if (last_status & 1)
+			return !(last_status & 0x0e);
+	}
+	return 0;
+}
+#endif
+
 static void show_keys(void)
 {
 	char buf[96], *p;
@@ -424,6 +464,20 @@ static void show_keys(void)
 		fmt_hex(p, last_status, 8);
 	}
 	con_line("GPIO6", buf);
+#ifdef VOLUP_PULLUP
+	uint8_t pull = 0xff;
+	spmi_read(gpio, 0xc542, &pull);
+	int wok = spmi_write(gpio, 0xc542, 0x00);
+	uint8_t pull2 = 0xff;
+	spmi_read(gpio, 0xc542, &pull2);
+	p = fmt_str(buf, "pull-up write ");
+	p = fmt_str(p, wok ? "ok" : "FAILED");
+	p = fmt_str(p, ": pull ");
+	p = fmt_hex(p, pull, 2);
+	p = fmt_str(p, " -> ");
+	fmt_hex(p, pull2, 2);
+	con_line("", buf);
+#endif
 
 	con_skip();
 	con_line("KEYS", "press power / volume up / volume down now");
