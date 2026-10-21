@@ -315,6 +315,11 @@ core, so it is not the 8-core stall either. lsd (sampled) is blocked in
 and `-[_LSInstallProgressService restoreInactiveInstalls]`: the
 LaunchServices database is never seeded. Suspect: our tweaks skip the
 first-boot data migration from the start (sweet ran it once first).
+Fix applied 2026-10-21 02:20: `phone.sh sync` (142/4096 pieces had
+changed on the phone), `tools/migration-reset.py` on a clone (markers
+removed, `/private/var/datamigrator/migrate` sentinel), `simgdiff` = 101
+blocks / 404 KB, flashed in 0.5 s. `iosroot-tweaks.py` no longer skips the
+migration.
 
 ## Pixel 3 facts used here
 

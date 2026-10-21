@@ -10,7 +10,7 @@ NOTES.md; the code here is our own):
   launchd.plist   no daemon may panic the system when it crashes
                   (_PanicOnCrash renamed); CommCenter removed (no baseband)
   containers      /private/var/containers/... exist (normally the data volume)
-  migration       LastSystemVersion set, so DataMigration does not rerun
+  migration       left to run once on first boot (it seeds LaunchServices)
   audio/media     VirtualAudio HAL plug-in moved aside; MediaToolbox does not
                   start the recorder server (both crash without audio/GPU)
   SpringBoard     no watchdogs (CPU rendering is slow), no cloud-config UI
@@ -129,9 +129,8 @@ def main():
     containers(root)
     activation(root)
     audio_media(root)
-    preferences(root, 'com.apple.migration', {
-        'LastSystemVersion': BUILD,
-        'DMUserDataDisposition': {'SyntheticDidUpgrade': False, 'buildVersion': BUILD}})
+    # No migration skip: the first boot must run the data migration, which
+    # also seeds the LaunchServices database (lsd waits for it otherwise).
     preferences(root, 'com.apple.springboard', {
         'BKNoWatchdogs': True,
         'FBLaunchWatchdogExceptions': {'com.apple.purplebuddy': 100.0},
