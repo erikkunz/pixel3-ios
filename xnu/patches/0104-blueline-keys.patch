@@ -12,7 +12,7 @@ index 9e970d3..f8eef7d 100644
  bsd/dev/unix_startup.c			standard
 diff --git a/bsd/dev/blueline_keys.c b/bsd/dev/blueline_keys.c
 new file mode 100644
-index 0000000..a3500a1
+index 0000000..33c355a
 --- /dev/null
 +++ b/bsd/dev/blueline_keys.c
 @@ -0,0 +1,157 @@
@@ -20,7 +20,10 @@ index 0000000..a3500a1
 + * Pixel 3 (blueline) hardware keys, polled every 20 ms:
 + *   power       PM8998 PON (SID 0, peripheral 0x08) INT_RT_STS bit 0 (KPDPWR)
 + *   volume down PM8998 PON INT_RT_STS bit 1 (RESIN)
-+ *   volume up   PM8998 GPIO 6 (SID 0, peripheral 0xc5), active low
++ * Volume up (PM8998 GPIO 6, active low) is not read yet: as ABL leaves it
++ * (input, no pull-up configured, interrupt off) neither STATUS1 nor
++ * INT_RT_STS follows the key (p3-input probe), and this driver never
++ * writes PMIC registers.
 + * read through the SDM845 PMIC arbiter (v5) observer channel, and passed
 + * to the HID services (iokit/Kernel/arm/hid/SweetHID.cpp) as keys
 + * 0 power, 1 volume up, 2 volume down. Boot-arg bluekeys=0: off.
@@ -47,7 +50,6 @@ index 0000000..a3500a1
 +#define PPID_PON	0x008u
 +#define PPID_GPIO6	0x0c5u
 +#define PON_RT_STS	0x0810u
-+#define GPIO6_IN	0xc508u		/* STATUS1: bit 0 = input level */
 +#define NO_APID		0xffffu
 +
 +static vm_offset_t arb_core, arb_obs, arb_cnfg;
@@ -111,14 +113,12 @@ index 0000000..a3500a1
 +	int state[3] = { 0, 0, 0 };
 +	unsigned errors = 0;
 +	for (;;) {
-+		uint8_t pon = 0, gpio = 0;
++		uint8_t pon = 0;
 +		bool pok = arb_read(pon_apid, PON_RT_STS, &pon);
-+		bool gok = arb_read(gpio_apid, GPIO6_IN, &gpio);
-+		int now[3] = { !!(pon & 1u), !(gpio & 1u), !!(pon & 2u) };
-+		bool ok[3] = { pok, gok, pok };
-+		if ((!pok || !gok) && (errors++ % 250u) == 0) {
-+			printf("BLUELINE KEYS: read error pon=%d gpio=%d arbiter status %#x\n",
-+			    pok, gok, arb_status);
++		int now[3] = { !!(pon & 1u), 0, !!(pon & 2u) };
++		bool ok[3] = { pok, false, pok };	/* no volume up yet */
++		if (!pok && (errors++ % 250u) == 0) {
++			printf("BLUELINE KEYS: PON read error, arbiter status %#x\n", arb_status);
 +		}
 +		for (int k = 0; k < 3; k++) {
 +			if (ok[k] && now[k] != state[k]) {
@@ -165,7 +165,7 @@ index 0000000..a3500a1
 +	pon_apid = arb_apid(PPID_PON, count);
 +	gpio_apid = arb_apid(PPID_GPIO6, count);
 +	printf("BLUELINE KEYS: arbiter %#x, PON APID %u, GPIO6 APID %u\n", version, pon_apid, gpio_apid);
-+	if (pon_apid == NO_APID && gpio_apid == NO_APID) {
++	if (pon_apid == NO_APID) {
 +		return;
 +	}
 +	if (kernel_thread_start(keys_thread, NULL, &thread) == KERN_SUCCESS) {

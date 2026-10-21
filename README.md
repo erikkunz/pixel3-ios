@@ -294,6 +294,28 @@ adb reboot bootloader && fastboot flash userdata work/diff.simg
 mv work/ios-root-new.img work/ios-root.img
 ```
 
+## Step 4: input (in progress)
+
+`p3-input/` (probe, read-only on the PMIC), run 2026-10-21:
+
+| What | Result |
+| --- | --- |
+| SPMI arbiter | v5 (`0x50000000`), 512 APIDs; PON APID `0xac`, GPIO 6 APID `0xbe` |
+| Power | PON INT_RT_STS (`0x810`) bit 0: works |
+| Volume down | `0x810` bit 1 (RESIN): works |
+| Volume up | GPIO 6: input, enabled (`mode 0x00`, `en 0x80`, subtype `0x10`), but STATUS1 stays `0x80` and INT_RT_STS `0x00` when pressed (no pull-up/interrupt configured by ABL); left out for now |
+| Touch | `st_fts@49`, `st,fts`, on `i2c@888000` (`qcom,i2c-geni`); IRQ GPIO 125, reset GPIO 99, switch GPIO 136, `vdd`/`avdd` supplies, max 1079x2159. ST FTS protocol as in ios-raphael's 0086 (fts_521) |
+
+Kernel `0104-blueline-keys.patch`: power + volume down, polled every 20 ms,
+fed to the HID services (`bluekeys=0` off).
+
+Event stream (probe): 100 WFE take 82 us (Silver) / ~412 us (Gold) on every
+core, so it is not the 8-core stall either. lsd (sampled) is blocked in
+`__LAUNCH_SERVICES_CLIENTS_ARE_WAITING_FOR_THE_DATABASE_TO_FINISH_SEEDING__`
+and `-[_LSInstallProgressService restoreInactiveInstalls]`: the
+LaunchServices database is never seeded. Suspect: our tweaks skip the
+first-boot data migration from the start (sweet ran it once first).
+
 ## Pixel 3 facts used here
 
 | What | Value | Source |
