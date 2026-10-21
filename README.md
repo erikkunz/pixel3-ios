@@ -370,6 +370,26 @@ slowdown sweet also hit), 2x `hfs_clonefile: cluster_write failed - 34`.
 client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
 `sweetfb_hz=10` (0056's panel-copy throttle) to give the migration the CPU.
 
+### Other ports worth following
+
+- **ios-sailfish** (Pixel 1, Snapdragon 821; owner known to us): GPU
+  acceleration on the Adreno 530. Own kernel GPU driver (power, clocks,
+  SMMU, CP microcode, zap shader via TrustZone, buffer objects + command
+  submission), Mesa freedreno (GLES 3.1) injected into backboardd as
+  `sweetgl.dylib` behind an EAGL shim, so CoreAnimation's GLES renderer
+  runs on the GPU (no Metal). MDP double-buffered flips instead of a CPU
+  copy, 15-35 fps UI. For our Adreno 630 (A6xx) the user-space side
+  (freedreno a6xx) exists, but the kernel side needs the GMU (A6xx's GPU
+  management unit: its firmware, HFI messaging, RPMh votes), which A5xx
+  does not have; Linux's `drm/msm/adreno/a6xx_gmu.c` is the map. A large but
+  well-documented project, after touch/SMP.
+- Also from sailfish (credited to ios-topaz): IOKit never quiesces on iOS
+  (no `kernelmanagerd` to drop the IOKit-daemon busy hold), and QuartzCore
+  polls `IOAcceleratorES` 300x/100 ms per process. Our
+  `0107-iokit-quiet-ioacceleratores.patch` removes the hold and registers an
+  empty `IOAcceleratorES` (`sweetaccel=0` off). Candidate for the
+  `usermanagerd`/LaunchServices waits.
+
 ### Wi-Fi: what it would take (research, nothing built)
 
 The Pixel 3's Wi-Fi is the WCN3990 on SDM845's SNOC bus (Linux `ath10k_snoc`).

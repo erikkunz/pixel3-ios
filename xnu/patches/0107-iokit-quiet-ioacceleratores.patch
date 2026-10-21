@@ -1,0 +1,71 @@
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+index 59c834e..1325f84 100644
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -1200,7 +1200,9 @@ IOService::iokitDaemonLaunched(void)
+ 	}
+ 	IOServiceTrace(IOSERVICE_KEXTD_READY, 0, 0, 0, 0);
+ 	startDeferredMatches();
++#if !defined(ARM64_BOARD_CONFIG_SWEET)     /* SWEET takes no hold (IOStartIOKit.cpp) */
+ 	getServiceRoot()->adjustBusy(-1);
++#endif
+ 	IOService::publishUserResource(gIOResourceIOKitKey);
+ #endif /* !NO_KEXTD */
+ }
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+index d74c063..bd9bbd9 100644
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -187,7 +187,12 @@ StartIOKitMatching(void)
+ 		panic("Failed to start IOService matching");
+ 	}
+ 
+-#if !NO_KEXTD
++#if !NO_KEXTD && !defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * Not on SWEET: iOS has no IOKit daemon (kernelmanagerd) to report in, so
++	 * this busy count was never dropped and IOKit never went quiet (every
++	 * IOKitWaitQuiet caller, configd's InterfaceNamer, ... waited forever).
++	 */
+ 	if (OSKext::iokitDaemonAvailable()) {
+ 		/* Add a busy count to keep the registry busy until the IOKit daemon has
+ 		 * completely finished launching. This is decremented when the IOKit daemon
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index e032cfb..ef81fe8 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -118,6 +118,20 @@ public:
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+ 
++/*
++ * QuartzCore (CAMetalContextCreate) polls IOServiceMatching("IOAcceleratorES")
++ * up to 300 times, 100 ms apart, in every process that sets up CoreAnimation.
++ * An empty service ends the polling; without a MetalPluginName Metal skips
++ * it and CoreAnimation keeps its software renderer. Boot-arg sweetaccel=0
++ * leaves it out. (Finding from the ios-topaz and ios-sailfish ports.)
++ */
++class IOAcceleratorES : public IOService
++{
++	OSDeclareDefaultStructors(IOAcceleratorES);
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+ 
+@@ -193,6 +207,13 @@ AppleCLCD::start(IOService *provider)
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++	int accel = 1;
++	PE_parse_boot_argn("sweetaccel", &accel, sizeof(accel));
++	IOAcceleratorES *es = accel ? OSTypeAlloc(IOAcceleratorES) : NULL;
++	if (es != NULL && es->init() && es->attach(this)) {
++		es->registerService();
++	}
++	OSSafeReleaseNULL(es);
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+ 	return true;
