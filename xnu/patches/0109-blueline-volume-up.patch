@@ -1,0 +1,96 @@
+diff --git a/bsd/dev/blueline_keys.c b/bsd/dev/blueline_keys.c
+index 33c355a..0e1e76f 100644
+--- a/bsd/dev/blueline_keys.c
++++ b/bsd/dev/blueline_keys.c
+@@ -2,10 +2,12 @@
+  * Pixel 3 (blueline) hardware keys, polled every 20 ms:
+  *   power       PM8998 PON (SID 0, peripheral 0x08) INT_RT_STS bit 0 (KPDPWR)
+  *   volume down PM8998 PON INT_RT_STS bit 1 (RESIN)
+- * Volume up (PM8998 GPIO 6, active low) is not read yet: as ABL leaves it
+- * (input, no pull-up configured, interrupt off) neither STATUS1 nor
+- * INT_RT_STS follows the key (p3-input probe), and this driver never
+- * writes PMIC registers.
++ *   volume up   PM8998 GPIO 6 (SID 0, peripheral 0xc5) STATUS1 bit 0, low
++ *               when pressed. ABL leaves it an input without pull-up, so
++ *               this sets the 30 uA pull-up once (DIG_PULL_CTL 0xc542 = 0,
++ *               Linux's bias-pull-up for this key; verified with the
++ *               p3-input probe). Boot-arg bluevolup=0 skips it.
++ * That pull-up is the only PMIC register this driver writes.
+  * read through the SDM845 PMIC arbiter (v5) observer channel, and passed
+  * to the HID services (iokit/Kernel/arm/hid/SweetHID.cpp) as keys
+  * 0 power, 1 volume up, 2 volume down. Boot-arg bluekeys=0: off.
+@@ -32,9 +34,12 @@ void blueline_keys_init(void);
+ #define PPID_PON	0x008u
+ #define PPID_GPIO6	0x0c5u
+ #define PON_RT_STS	0x0810u
++#define GPIO6_STATUS1	0xc508u		/* bit 0: input level */
++#define GPIO6_PULL	0xc542u		/* DIG_PULL_CTL: 0 = 30 uA pull-up */
++#define ARB_CHNLS_PA	0x0c600000u	/* read/write channels, 0x10000 per APID */
+ #define NO_APID		0xffffu
+ 
+-static vm_offset_t arb_core, arb_obs, arb_cnfg;
++static vm_offset_t arb_core, arb_obs, arb_cnfg, arb_chnls;
+ static uint16_t pon_apid = NO_APID, gpio_apid = NO_APID;
+ static uint32_t arb_status;
+ static int keys_chan;
+@@ -89,16 +94,42 @@ arb_read(uint16_t apid, uint16_t addr, uint8_t *out)
+ 	return false;
+ }
+ 
++/* One-byte EXT_WRITEL on read/write channel apid, only if the apps EE owns it. */
++static bool
++arb_write(uint16_t apid, uint16_t addr, uint8_t val)
++{
++	if (apid == NO_APID || apid != gpio_apid || !arb_chnls ||
++	    (arb_rd(arb_cnfg, 0x700u + 4u * apid) & 7u) != 0) {
++		return false;
++	}
++	vm_offset_t ch = arb_chnls;			/* mapped for gpio_apid only */
++	*(volatile uint32_t *)(ch + 0x10u) = val;		/* WDATA0 */
++	__asm__ volatile ("dsb osh" ::: "memory");
++	*(volatile uint32_t *)ch = (uint32_t)(addr & 0xffu) << 4;	/* EXT_WRITEL */
++	__asm__ volatile ("dsb osh" ::: "memory");
++	for (unsigned i = 0; i < 1000; i++) {
++		arb_status = arb_rd(ch, 0x08u);
++		if (arb_status & 1u) {
++			return !(arb_status & 0x0eu);
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static bool volup_on;
++
+ static void
+ keys_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	int state[3] = { 0, 0, 0 };
+ 	unsigned errors = 0;
+ 	for (;;) {
+-		uint8_t pon = 0;
++		uint8_t pon = 0, g6 = 1;
+ 		bool pok = arb_read(pon_apid, PON_RT_STS, &pon);
+-		int now[3] = { !!(pon & 1u), 0, !!(pon & 2u) };
+-		bool ok[3] = { pok, false, pok };	/* no volume up yet */
++		bool gok = volup_on && arb_read(gpio_apid, GPIO6_STATUS1, &g6);
++		int now[3] = { !!(pon & 1u), !(g6 & 1u), !!(pon & 2u) };
++		bool ok[3] = { pok, gok, pok };
+ 		if (!pok && (errors++ % 250u) == 0) {
+ 			printf("BLUELINE KEYS: PON read error, arbiter status %#x\n", arb_status);
+ 		}
+@@ -147,6 +178,14 @@ blueline_keys_init(void)
+ 	pon_apid = arb_apid(PPID_PON, count);
+ 	gpio_apid = arb_apid(PPID_GPIO6, count);
+ 	printf("BLUELINE KEYS: arbiter %#x, PON APID %u, GPIO6 APID %u\n", version, pon_apid, gpio_apid);
++	int volup = 1;
++	(void)PE_parse_boot_argn("bluevolup", &volup, sizeof(volup));
++	if (volup && gpio_apid != NO_APID) {
++		arb_chnls = ml_io_map(ARB_CHNLS_PA + 0x10000u * gpio_apid, 0x1000);
++		volup_on = arb_write(gpio_apid, GPIO6_PULL, 0x00);
++		printf("BLUELINE KEYS: volume up %s\n", volup_on ? "on (GPIO 6 pull-up set)" :
++		    "off (pull-up write refused)");
++	}
+ 	if (pon_apid == NO_APID) {
+ 		return;
+ 	}

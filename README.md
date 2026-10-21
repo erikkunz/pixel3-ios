@@ -414,8 +414,15 @@ APID, then shows the key live. Only after approval; the kernel driver gets
 the same write behind `bluevolup=1` once the probe shows which status bit
 follows the key.
 
-Touch probe (next run): also shows `SE_GENI_IF_DISABLE_RO` (FIFO disabled
--> GPI DMA only) and the command/status registers right after a command.
+Probe run 2026-10-22: **volume up works** with STATUS1 bit 0 (`0x81`
+released, `0x80` pressed). The pull-up write reported `0x00 -> 0x00`: it
+was already set. Kernel `0109-blueline-volume-up.patch` reads it as key 1
+(writes the pull-up once anyway, `bluevolup=0` skips).
+
+**Touch: SE2 has its FIFO interface disabled** (`SE_GENI_IF_DISABLE_RO` = 1,
+"DMA only"); after an I2C command the engine sits active (`GENI_STATUS`
+`0x41`) waiting for GPI DMA. Touch therefore needs a GPI DMA I2C path (Linux
+`qcom-gpi-dma` + `i2c-qcom-geni` GPI mode).
 
 ### Wi-Fi: what it would take (research, nothing built)
 
