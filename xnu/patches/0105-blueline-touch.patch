@@ -1,0 +1,259 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index f8eef7d..27184ab 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,7 @@ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/blueline_keys.c			standard
++bsd/dev/blueline_touch.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/blueline_touch.c b/bsd/dev/blueline_touch.c
+new file mode 100644
+index 0000000..d859fe6
+--- /dev/null
++++ b/bsd/dev/blueline_touch.c
+@@ -0,0 +1,221 @@
++/*
++ * Pixel 3 (blueline) touchscreen: ST FTS ("st,fts" at I2C 0x49) on the
++ * GENI I2C engine QUP wrapper 0 / SE2 (i2c@888000), polled every 10 ms,
++ * contacts passed to the HID services (iokit/Kernel/arm/hid/SweetHID.cpp)
++ * in panel pixels (1080x2160).
++ *
++ * Off by default until the p3-input probe has shown the chip answering:
++ * boot-arg bluetouch=1 turns it on. Writes: GCC clock votes for wrapper 0
++ * AHB and SE2 plus the SE2 clock source (crystal), the TLMM mux of GPIO
++ * 27/28 to qup2, and the serial engine's registers. The chip only gets
++ * read commands (no reset, no power or scan-mode changes): it must already
++ * be sensing.
++ *
++ * FTS event FIFO (command 0x86, 8-byte events, byte 7 bits 4:0 = events
++ * still queued): byte 0 high nibble 1 enter, 2 motion, 3 leave; byte 1 =
++ * id << 4 | type (1 finger); x = (b3 & 0xf) << 8 | b2, y = b4 << 4 | b3 >> 4.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void blueline_touch_init(void);
++
++#define GCC_PA		0x00100000u
++#define GCC_VOTE	0x5200cu	/* bits 6 m_ahb, 7 s_ahb, 12 SE2 */
++#define GCC_S2_RCG	0x17294u
++#define TLMM_EAST_PA	0x03500000u
++#define SE_PA		0x00888000u
++
++#define SE_FW_REV	0x068u
++#define SE_M_CLK_CFG	0x048u
++#define SE_CLK_SEL	0x07cu
++#define SE_DMA_MODE	0x258u
++#define SE_TX_PACK0	0x260u
++#define SE_TX_PACK1	0x264u
++#define SE_I2C_TX_LEN	0x26cu
++#define SE_I2C_RX_LEN	0x270u
++#define SE_I2C_SCL	0x278u
++#define SE_RX_PACK0	0x284u
++#define SE_RX_PACK1	0x288u
++#define SE_M_CMD0	0x600u
++#define SE_M_IRQ_STAT	0x610u
++#define SE_M_IRQ_CLR	0x618u
++#define SE_TX_FIFO	0x700u
++#define SE_RX_FIFO	0x780u
++#define SE_RX_FIFO_ST	0x804u
++#define M_CMD_DONE	(1u << 0)
++#define M_ERRORS	(0x0eu | (0x3fu << 9))
++#define FTS_ADDR	0x49u
++#define MAX_FINGERS	10
++
++static vm_offset_t se;
++static int touch_chan;
++
++static uint32_t
++rd(vm_offset_t a)
++{
++	uint32_t v = *(volatile uint32_t *)a;
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++wr(vm_offset_t a, uint32_t v)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)a = v;
++}
++
++static int
++i2c_msg(bool read, const uint8_t *tx, uint8_t *rx, uint32_t len, bool stretch)
++{
++	wr(se + SE_M_IRQ_CLR, 0xffffffffu);
++	wr(se + (read ? SE_I2C_RX_LEN : SE_I2C_TX_LEN), len);
++	wr(se + SE_M_CMD0, ((read ? 2u : 1u) << 27) | (FTS_ADDR << 9) | (stretch ? 4u : 0u));
++	for (uint32_t i = 0; !read && i < len; i += 4) {
++		uint32_t word = 0;
++		for (uint32_t b = 0; b < 4 && i + b < len; b++) {
++			word |= (uint32_t)tx[i + b] << (8 * b);
++		}
++		wr(se + SE_TX_FIFO, word);
++	}
++	uint32_t st = 0;
++	for (unsigned n = 0; n < 20000; n++) {	/* ~20 ms */
++		st = rd(se + SE_M_IRQ_STAT);
++		if (st & (M_CMD_DONE | M_ERRORS)) {
++			break;
++		}
++		delay(1);
++	}
++	wr(se + SE_M_IRQ_CLR, st);
++	if (!(st & M_CMD_DONE) || (st & M_ERRORS)) {
++		return EIO;
++	}
++	if (read) {
++		uint32_t words = rd(se + SE_RX_FIFO_ST) & 0x1ffffffu, got = 0;
++		for (uint32_t i = 0; i < words; i++) {
++			uint32_t word = rd(se + SE_RX_FIFO);
++			for (uint32_t b = 0; b < 4 && got < len; b++) {
++				rx[got++] = (uint8_t)(word >> (8 * b));
++			}
++		}
++		if (got < len) {
++			return EIO;
++		}
++	}
++	return 0;
++}
++
++static int
++fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
++{
++	int err = i2c_msg(false, cmd, NULL, clen, true);
++	return err ? err : i2c_msg(true, NULL, out, len, false);
++}
++
++static void
++touch_thread(__unused void *arg, __unused wait_result_t wr_)
++{
++	static const uint8_t fifo_cmd[1] = { 0x86 };
++	uint8_t buf[8 * 32];
++	uint32_t down = 0;
++	int x[MAX_FINGERS] = { 0 }, y[MAX_FINGERS] = { 0 };
++	unsigned errors = 0;
++
++	for (;;) {
++		int err = fts_read(fifo_cmd, 1, buf, 8);
++		if (!err && buf[0] != 0) {
++			unsigned more = buf[7] & 0x1fu;
++			if (more && fts_read(fifo_cmd, 1, buf + 8, more * 8u)) {
++				more = 0;
++			}
++			for (unsigned e = 0; e <= more; e++) {
++				const uint8_t *ev = buf + 8 * e;
++				unsigned kind = ev[0] >> 4, id = ev[1] >> 4, type = ev[1] & 0xfu;
++				if (id >= MAX_FINGERS) {
++					continue;
++				}
++				if ((kind == 1 || kind == 2) && type != 0 && type != 3) {
++					x[id] = ((ev[3] & 0xf) << 8) | ev[2];
++					y[id] = (ev[4] << 4) | (ev[3] >> 4);
++					down |= 1u << id;
++					sweet_hid_touch((int)id, 1, x[id], y[id]);
++				} else if (kind == 3 && (down & (1u << id))) {
++					down &= ~(1u << id);
++					sweet_hid_touch((int)id, 0, x[id], y[id]);
++				}
++			}
++		} else if (err && (errors++ % 500u) == 0) {
++			printf("BLUELINE TOUCH: FIFO read error\n");
++		}
++		uint64_t deadline;
++		clock_interval_to_deadline(10, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&touch_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++void
++blueline_touch_init(void)
++{
++	static bool started;
++	int enabled = 0;
++	thread_t thread;
++
++	if (started) {
++		return;
++	}
++	started = true;
++	(void)PE_parse_boot_argn("bluetouch", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("BLUELINE TOUCH: off (bluetouch=1 to enable)\n");
++		return;
++	}
++	vm_offset_t gcc = ml_io_map(GCC_PA, 0x60000);
++	vm_offset_t tlmm = ml_io_map(TLMM_EAST_PA, 0x20000);
++	se = ml_io_map(SE_PA, 0x4000);
++	if (!gcc || !tlmm || !se) {
++		printf("BLUELINE TOUCH: MMIO mapping failed\n");
++		return;
++	}
++	wr(gcc + GCC_VOTE, rd(gcc + GCC_VOTE) | (1u << 6) | (1u << 7) | (1u << 12));
++	wr(gcc + GCC_S2_RCG + 4, 1u);			/* crystal, divider 1 */
++	wr(gcc + GCC_S2_RCG, rd(gcc + GCC_S2_RCG) | 1u);
++	delay(100);
++	wr(tlmm + 0x1000u * 27, 1u << 2);		/* GPIO 27/28: qup2 */
++	wr(tlmm + 0x1000u * 28, 1u << 2);
++	uint32_t fw = rd(se + SE_FW_REV);
++	if (((fw >> 8) & 0xffu) != 3) {
++		printf("BLUELINE TOUCH: SE2 firmware %#x is not I2C\n", fw);
++		return;
++	}
++	wr(se + SE_DMA_MODE, 0);
++	wr(se + SE_TX_PACK0, 0x0004380eu);
++	wr(se + SE_TX_PACK1, 0x000c3e0eu);
++	wr(se + SE_RX_PACK0, 0x0004380eu);
++	wr(se + SE_RX_PACK1, 0x000c3e0eu);
++	wr(se + SE_CLK_SEL, 0);
++	wr(se + SE_M_CLK_CFG, (2u << 4) | 1u);		/* 400 kHz from 19.2 MHz */
++	wr(se + SE_I2C_SCL, (5u << 20) | (12u << 10) | 24u);
++
++	static const uint8_t id_cmd[5] = { 0xfa, 0x20, 0x00, 0x00, 0x00 };
++	uint8_t id[4] = { 0 };
++	if (fts_read(id_cmd, sizeof(id_cmd), id, sizeof(id))) {
++		printf("BLUELINE TOUCH: no answer from FTS at 0x49; touch off\n");
++		return;
++	}
++	printf("BLUELINE TOUCH: FTS chip id %02x %02x %02x %02x, polling every 10 ms\n",
++	    id[0], id[1], id[2], id[3]);
++	if (kernel_thread_start(touch_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 4775d74..f249198 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -48,6 +48,7 @@ extern int hz;
+ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void blueline_keys_init(void);
++extern void blueline_touch_init(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -602,6 +603,7 @@ sweet_ufs_init(void)
+ 	sweet_sample_start();
+ 	/* Pixel 3 hardware keys (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	blueline_keys_init();
++	blueline_touch_init();
+ 	return 0;
+ }
+ 
