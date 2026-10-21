@@ -43,6 +43,7 @@
 struct core_report {
 	uint64_t done, mpidr, el, frq, vct, pct;
 	uint64_t gicr, waker, wake_ticks, hppir, ctl, woke;
+	uint64_t cntkctl_before, wfe_ticks;
 };
 static volatile struct core_report reports[NCORES];
 extern char secondary_entry[];
@@ -140,6 +141,23 @@ static void timer_test(volatile struct core_report *r)
 	r->woke = 1;
 	wsr("CNTV_CTL_EL0", 2);			/* masked: stop it firing */
 	__asm__ volatile("isb");
+
+	/*
+	 * WFE event stream, set up as XNU does (_enable_timebase_event_stream:
+	 * EVENTI ORed in, EVNTEN, EVNTDIR) for ~1 us events at 19.2 MHz. XNU's
+	 * delay() and lock spins wait in WFE and count on it to wake them.
+	 * 100 WFEs should then take ~100 events' worth of time, not seconds.
+	 */
+	uint64_t k = rsr("CNTKCTL_EL1");
+	r->cntkctl_before = k;
+	wsr("CNTKCTL_EL1", k | (4U << 4) | (1U << 2) | (1U << 3));
+	__asm__ volatile("isb; sevl; wfe" ::: "memory");	/* clear any pending event */
+	t0 = now();
+	uint64_t limit = t0 + 2 * frq;			/* give up after 2 s */
+	int n = 0;
+	for (; n < 100 && now() < limit; n++)
+		__asm__ volatile("wfe" ::: "memory");
+	r->wfe_ticks = n == 100 ? now() - t0 : ~0ULL;
 }
 
 void secondary_main(uint64_t i)
@@ -176,7 +194,7 @@ static void smp_test(void)
 		while (reports[i].done != 2 && now() < end)
 			;
 	}
-	con_line("SMP", "core mpidr  EL CNTVOFF  timer: wake  hppir  ctl");
+	con_line("SMP", "core mpidr CNTVOFF timer hppir ctl | cntkctl 100xWFE");
 	for (unsigned i = 0; i < NCORES; i++) {
 		volatile struct core_report *r = &reports[i];
 		p = fmt_dec(buf, i);
@@ -187,20 +205,27 @@ static void smp_test(void)
 		} else {
 			p = fmt_hex(p, r->mpidr & 0xffff, 4);
 			p = fmt_str(p, " ");
-			p = fmt_dec(p, r->el);
-			p = fmt_str(p, "  ");
-			p = fmt_hex(p, r->pct - r->vct, 4);
-			p = fmt_str(p, r->frq == reports[0].frq ? "  " : "! ");
+			p = fmt_hex(p, r->pct - r->vct, 1);
+			p = fmt_str(p, r->frq == reports[0].frq ? " " : "!");
 			if (!r->gicr) {
 				fmt_str(p, "no GICR frame");
 			} else if (!r->woke) {
 				fmt_str(p, "NEVER WOKE");
 			} else {
 				p = fmt_dec(p, r->wake_ticks * 1000 / (r->frq ? r->frq : 19200000));
-				p = fmt_str(p, "ms  ");
-				p = fmt_hex(p, r->hppir & 0xffffff, 3);
-				p = fmt_str(p, "  ");
-				fmt_hex(p, r->ctl, 1);
+				p = fmt_str(p, "ms ");
+				p = fmt_hex(p, r->hppir & 0xffffff, 2);
+				p = fmt_str(p, " ");
+				p = fmt_hex(p, r->ctl, 1);
+				p = fmt_str(p, " | ");
+				p = fmt_hex(p, r->cntkctl_before, 3);
+				p = fmt_str(p, " ");
+				if (r->wfe_ticks == ~0ULL) {
+					fmt_str(p, "STUCK");
+				} else {
+					p = fmt_dec(p, r->wfe_ticks * 1000000 / (r->frq ? r->frq : 19200000));
+					fmt_str(p, "us");
+				}
 			}
 		}
 		con_line("", buf);
