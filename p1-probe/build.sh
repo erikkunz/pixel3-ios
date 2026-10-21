@@ -7,6 +7,9 @@
 # are reused. Without one, the mainline sdm845-google-blueline.dtb in
 # ../dtb/ is used. Toolchain notes: ../common/build.sh.
 set -euo pipefail
+# Absolute path first: a relative one is meant from the caller's directory.
+stock=${1:-}
+[ -z "$stock" ] || stock=$(cd "$(dirname "$stock")" && pwd)/$(basename "$stock")
 cd "$(dirname "$0")"
 . ../common/build.sh
-build_image probe "probe.c secondary.S" "${1:-}"
+build_image probe "probe.c secondary.S" "$stock"
