@@ -44,6 +44,7 @@ struct core_report {
 	uint64_t done, mpidr, el, frq, vct, pct;
 	uint64_t gicr, waker, wake_ticks, hppir, ctl, woke;
 	uint64_t cntkctl_before, wfe_ticks;
+	uint64_t sgi_sent, sgi_got, sgi_iar;	/* cross-core SGI 1 from core 0 */
 };
 static volatile struct core_report reports[NCORES];
 extern char secondary_entry[];
@@ -116,7 +117,7 @@ static void timer_test(volatile struct core_report *r)
 	uint64_t sgi = gicr + 0x10000;
 	mmio32(sgi + 0x80) = 0xffffffffU;		/* IGROUPR0: Group 1 */
 	*(volatile uint8_t *)(sgi + 0x400 + VTIMER_INTID) = 0xa0;
-	mmio32(sgi + 0x100) = 1U << VTIMER_INTID;	/* ISENABLER0 */
+	mmio32(sgi + 0x100) = (1U << VTIMER_INTID) | (1U << 1);	/* ISENABLER0: timer + SGI 1 */
 	wsr("ICC_SRE_EL1", rsr("ICC_SRE_EL1") | 1);
 	__asm__ volatile("isb");
 	wsr("ICC_PMR_EL1", 0xff);
@@ -160,6 +161,25 @@ static void timer_test(volatile struct core_report *r)
 	r->wfe_ticks = n == 100 ? now() - t0 : ~0ULL;
 }
 
+/*
+ * Wait (IRQs masked; WFI still wakes on a pending IRQ) for SGI 1 from
+ * core 0, sent with the encoding XNU's SweetCPU::signalCPU uses, then
+ * acknowledge it. Records when it arrived and what IAR1 returned.
+ */
+static void wait_sgi(volatile struct core_report *r)
+{
+	uint64_t end = now() + 3 * ticks_per_s();
+	while (now() < end && !r->sgi_got) {
+		__asm__ volatile("dsb sy; wfi" ::: "memory");
+		if ((rsr("ICC_HPPIR1_EL1") & 0xffffff) == 1) {
+			uint64_t iar = rsr("ICC_IAR1_EL1");
+			wsr("ICC_EOIR1_EL1", iar);
+			r->sgi_iar = iar;
+			r->sgi_got = now();
+		}
+	}
+}
+
 void secondary_main(uint64_t i)
 {
 	if (i >= NCORES)
@@ -169,6 +189,19 @@ void secondary_main(uint64_t i)
 	__asm__ volatile("dsb sy" ::: "memory");
 	reports[i].done = 2;
 	__asm__ volatile("dsb sy" ::: "memory");
+	wait_sgi(&reports[i]);
+}
+
+static void send_sgi(unsigned i)
+{
+#ifdef QEMU
+	uint64_t v = (1ULL << 24) | (1ULL << i);		/* Aff0 = core */
+#else
+	uint64_t v = (1ULL << 24) | ((uint64_t)i << 16) | 1;	/* Aff1 = core, Aff0 0 */
+#endif
+	__asm__ volatile("dsb ishst" ::: "memory");
+	wsr("ICC_SGI1R_EL1", v);
+	__asm__ volatile("isb");
 }
 
 static void smp_test(void)
@@ -193,8 +226,18 @@ static void smp_test(void)
 		uint64_t end = now() + 2 * ticks_per_s();
 		while (reports[i].done != 2 && now() < end)
 			;
+		if (reports[i].done == 2) {	/* core i now waits for our SGI */
+			uint64_t t = now() + ticks_per_s() / 1000;
+			while (now() < t)
+				;
+			reports[i].sgi_sent = now();
+			send_sgi(i);
+			t = now() + ticks_per_s() / 2;
+			while (!reports[i].sgi_got && now() < t)
+				;
+		}
 	}
-	con_line("SMP", "core mpidr CNTVOFF timer hppir ctl | cntkctl 100xWFE");
+	con_line("SMP", "core mpidr timer hppir | 100xWFE | SGI from cpu0");
 	for (unsigned i = 0; i < NCORES; i++) {
 		volatile struct core_report *r = &reports[i];
 		p = fmt_dec(buf, i);
@@ -205,8 +248,6 @@ static void smp_test(void)
 		} else {
 			p = fmt_hex(p, r->mpidr & 0xffff, 4);
 			p = fmt_str(p, " ");
-			p = fmt_hex(p, r->pct - r->vct, 1);
-			p = fmt_str(p, r->frq == reports[0].frq ? " " : "!");
 			if (!r->gicr) {
 				fmt_str(p, "no GICR frame");
 			} else if (!r->woke) {
@@ -215,16 +256,22 @@ static void smp_test(void)
 				p = fmt_dec(p, r->wake_ticks * 1000 / (r->frq ? r->frq : 19200000));
 				p = fmt_str(p, "ms ");
 				p = fmt_hex(p, r->hppir & 0xffffff, 2);
-				p = fmt_str(p, " ");
-				p = fmt_hex(p, r->ctl, 1);
 				p = fmt_str(p, " | ");
-				p = fmt_hex(p, r->cntkctl_before, 3);
-				p = fmt_str(p, " ");
 				if (r->wfe_ticks == ~0ULL) {
-					fmt_str(p, "STUCK");
+					p = fmt_str(p, "STUCK");
 				} else {
 					p = fmt_dec(p, r->wfe_ticks * 1000000 / (r->frq ? r->frq : 19200000));
-					fmt_str(p, "us");
+					p = fmt_str(p, "us");
+				}
+				p = fmt_str(p, " | ");
+				if (i == 0)
+					fmt_str(p, "-");
+				else if (!r->sgi_got)
+					fmt_str(p, r->sgi_sent ? "NOT DELIVERED" : "not sent");
+				else {
+					p = fmt_dec(p, (r->sgi_got - r->sgi_sent) * 1000000 / (r->frq ? r->frq : 19200000));
+					p = fmt_str(p, "us iar=");
+					fmt_hex(p, r->sgi_iar & 0xffffff, 1);
 				}
 			}
 		}
