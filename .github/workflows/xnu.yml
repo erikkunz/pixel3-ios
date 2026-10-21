@@ -37,6 +37,11 @@ env:
   # PSCI CPU_ON (our 0101 lifts its six-core limit to eight), 0067 console
   # mute once the GUI presents (sweetfb_noconsole=1), 0070 pid_hibernate.
   SWEET_EXTRA: "0061 0064 0065 0067 0070"
+  # ios-sailfish (Pixel 1 port; reuse cleared with its owner): generic fixes
+  # applied after ours, renamed 02xx-sf-NNNN so their order is fixed.
+  SAILFISH_REPO: https://github.com/joranv1/ios-sailfish
+  SAILFISH_SHA: ce637521bacc06fab5cc29cf144febee2fca9ff8
+  SAILFISH_PATCHES: "0082 0086 0101 0104 0110 0139 0152 0153 0165"
   MACOS_VERSION: "13.5"			# xnu-8796.141.3, the iOS 16 generation
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: SWEET
@@ -67,6 +72,17 @@ jobs:
           for f in xnu/patches/*.patch; do
             cp "$f" dxb/patches/
             basename "$f" >> patch-list.txt
+          done
+          git init -q sailfish
+          git -C sailfish fetch -q --depth 1 "$SAILFISH_REPO" "$SAILFISH_SHA"
+          git -C sailfish checkout -q FETCH_HEAD
+          i=200
+          for n in $SAILFISH_PATCHES; do
+            f=$(ls sailfish/xnu/patches/$n-*.patch)
+            dst="0${i}-sf-$(basename "$f")"
+            cp "$f" "dxb/patches/$dst"
+            echo "$dst" >> patch-list.txt
+            i=$((i + 1))
           done
           # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
