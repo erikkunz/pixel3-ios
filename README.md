@@ -360,6 +360,16 @@ caches on, not the hardware. iOS boots stay on `cpus=1` meanwhile.
 (`DONE MKB_INIT`), launchd execs `usermanagerd` (16:00:56) and nothing
 follows for minutes; no crash. Next boot samples `usermanagerd`.
 
+**Data migration runs (1 core, kernel with 0103-0105, 20:05).** The next
+boot passed `usermanagerd` and showed iOS's migration screen (Apple logo +
+progress bar); the bar reached ~98% in ~30 min, then crawled. Log after
+~1 h 50 min: `migrationpluginwrapper` ran 3x, backboardd had presented
+**193,000 frames** (~60 Hz, a full 10 MB copy each, on the only core: the
+slowdown sweet also hit), 2x `hfs_clonefile: cluster_write failed - 34`.
+**Keys work in iOS**: power and volume down reach the HID services with a
+client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
+`sweetfb_hz=10` (0056's panel-copy throttle) to give the migration the CPU.
+
 ### Wi-Fi: what it would take (research, nothing built)
 
 The Pixel 3's Wi-Fi is the WCN3990 on SDM845's SNOC bus (Linux `ath10k_snoc`).
