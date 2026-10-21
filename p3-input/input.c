@@ -21,7 +21,7 @@
 #define LIVE_SECONDS	3
 #define HOLD_SECONDS	2
 #else
-#define LIVE_SECONDS	60
+#define LIVE_SECONDS	30
 #define HOLD_SECONDS	30
 #endif
 
@@ -130,6 +130,196 @@ static void show_touch(uintptr_t dtb)
 		}
 		con_line("", buf);
 	}
+}
+
+/* ---- touch bus: GENI I2C on QUP wrapper 0, SE2 (i2c@888000) ---- */
+
+/*
+ * Only these writes: GCC clock votes (wrapper 0 m/s AHB, SE2) and the SE2
+ * clock source set to the 19.2 MHz crystal (gcc-sdm845.c), the TLMM mux of
+ * GPIO 27/28 to qup2 (pinctrl-sdm845.c), and the serial engine's own
+ * registers (i2c-qcom-geni.c / qcom-geni-se.h). Reset, IRQ and bus-switch
+ * GPIOs are only read. The touch chip only gets read commands.
+ */
+#define GCC		0x00100000UL
+#define GCC_VOTE	(GCC + 0x5200c)		/* bits 6 m_ahb, 7 s_ahb, 12 s2 */
+#define GCC_S2_CBCR	(GCC + 0x17290)
+#define GCC_S2_RCG	(GCC + 0x17294)		/* CMD; CFG at +4 */
+#define TLMM_EAST	0x03500000UL
+#define TLMM_NORTH	0x03900000UL
+#define GPIO_CFG(t, n)	((t) + 0x1000UL * (n))
+#define GPIO_IO(t, n)	(GPIO_CFG(t, n) + 4)
+#define SE		0x00888000UL
+#define SE_FW_REV	0x068
+#define SE_M_CLK_CFG	0x048
+#define SE_CLK_SEL	0x07c
+#define SE_DMA_MODE	0x258
+#define SE_TX_PACK0	0x260
+#define SE_TX_PACK1	0x264
+#define SE_I2C_TX_LEN	0x26c
+#define SE_I2C_RX_LEN	0x270
+#define SE_I2C_SCL	0x278
+#define SE_RX_PACK0	0x284
+#define SE_RX_PACK1	0x288
+#define SE_M_CMD0	0x600
+#define SE_M_IRQ_STAT	0x610
+#define SE_M_IRQ_CLR	0x618
+#define SE_TX_FIFO	0x700
+#define SE_RX_FIFO	0x780
+#define SE_RX_FIFO_ST	0x804
+#define M_CMD_DONE	(1U << 0)
+#define M_ERRORS	(0x0eU | (0x3fU << 9))	/* overrun/illegal/fail + GP IRQs (NACK = bit 10) */
+#define I2C_WRITE	1U
+#define I2C_READ	2U
+#define FTS_ADDR	0x49U
+
+#define w32(a, v)	(*(volatile uint32_t *)(a) = (v))
+
+static uint32_t rd32(uintptr_t a);	/* below, with the SPMI code */
+
+static uint32_t i2c_status;
+
+static void spin_us(uint64_t us)
+{
+	uint64_t end = now() + ticks_per_s() * us / 1000000;
+	while (now() < end)
+		;
+}
+
+static int i2c_wait(void)
+{
+	uint64_t end = now() + ticks_per_s() / 50;	/* 20 ms */
+	while (now() < end) {
+		i2c_status = rd32(SE + SE_M_IRQ_STAT);
+		if (i2c_status & (M_CMD_DONE | M_ERRORS)) {
+			w32(SE + SE_M_IRQ_CLR, i2c_status);
+			return (i2c_status & M_ERRORS) ? -1 : 0;
+		}
+	}
+	return -2;
+}
+
+/* One I2C message; stretch = repeated start follows (no STOP). */
+static int i2c_xfer(int read, const uint8_t *tx, uint8_t *rx, uint32_t len, int stretch)
+{
+	w32(SE + SE_M_IRQ_CLR, 0xffffffffU);
+	w32(SE + (read ? SE_I2C_RX_LEN : SE_I2C_TX_LEN), len);
+	w32(SE + SE_M_CMD0, ((read ? I2C_READ : I2C_WRITE) << 27) | (FTS_ADDR << 9) | (stretch ? 4U : 0));
+	if (!read) {
+		for (uint32_t i = 0; i < len; i += 4) {
+			uint32_t word = 0;
+			for (uint32_t b = 0; b < 4 && i + b < len; b++)
+				word |= (uint32_t)tx[i + b] << (8 * b);
+			w32(SE + SE_TX_FIFO, word);
+		}
+	}
+	int rc = i2c_wait();
+	if (read && rc == 0) {
+		uint32_t words = rd32(SE + SE_RX_FIFO_ST) & 0x1ffffff, got = 0;
+		for (uint32_t i = 0; i < words; i++) {
+			uint32_t word = rd32(SE + SE_RX_FIFO);
+			for (uint32_t b = 0; b < 4 && got < len; b++)
+				rx[got++] = (uint8_t)(word >> (8 * b));
+		}
+		if (got < len)
+			rc = -3;
+	}
+	return rc;
+}
+
+static int fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
+{
+	int rc = i2c_xfer(0, cmd, 0, clen, 1);
+	return rc ? rc : i2c_xfer(1, 0, out, len, 0);
+}
+
+static void show_touch_bus(void)
+{
+	char buf[96], *p;
+
+	/* Clocks: wrapper 0 AHB + SE2 on, SE2 from the crystal (CFG src 0, div 1). */
+	w32(GCC_VOTE, rd32(GCC_VOTE) | (1U << 6) | (1U << 7) | (1U << 12));
+	w32(GCC_S2_RCG + 4, 1U);
+	w32(GCC_S2_RCG, rd32(GCC_S2_RCG) | 1U);		/* CMD_UPDATE */
+	spin_us(100);
+	/* SDA/SCL: GPIO 27/28 -> qup2 (function 1), no pull, 2 mA. */
+	w32(GPIO_CFG(TLMM_EAST, 27), 1U << 2);
+	w32(GPIO_CFG(TLMM_EAST, 28), 1U << 2);
+
+	p = fmt_str(buf, "gcc vote=");
+	p = fmt_hex(p, rd32(GCC_VOTE), 8);
+	p = fmt_str(p, " s2 cbcr=");
+	fmt_hex(p, rd32(GCC_S2_CBCR), 8);
+	con_line("I2C", buf);
+	uint32_t fw = rd32(SE + SE_FW_REV);
+	p = fmt_str(buf, "se fw=");
+	p = fmt_hex(p, fw, 8);
+	p = fmt_str(p, (fw >> 8 & 0xff) == 3 ? " (I2C)" : " (NOT I2C)");
+	con_line("", buf);
+	p = fmt_str(buf, "rst99=");
+	p = fmt_hex(p, rd32(GPIO_IO(TLMM_NORTH, 99)) & 3, 1);
+	p = fmt_str(p, " irq125=");
+	p = fmt_hex(p, rd32(GPIO_IO(TLMM_EAST, 125)) & 3, 1);
+	p = fmt_str(p, " sw136=");
+	p = fmt_hex(p, rd32(GPIO_IO(TLMM_NORTH, 136)) & 3, 1);
+	p = fmt_str(p, " cfg=");
+	fmt_hex(p, rd32(GPIO_CFG(TLMM_NORTH, 136)) & 0x3ff, 3);
+	con_line("PINS", buf);
+	if ((fw >> 8 & 0xff) != 3)
+		return;
+
+	/* FIFO mode, byte packing (first byte in bits 7:0), 400 kHz from 19.2 MHz. */
+	w32(SE + SE_DMA_MODE, 0);
+	w32(SE + SE_TX_PACK0, 0x0004380eU);
+	w32(SE + SE_TX_PACK1, 0x000c3e0eU);
+	w32(SE + SE_RX_PACK0, 0x0004380eU);
+	w32(SE + SE_RX_PACK1, 0x000c3e0eU);
+	w32(SE + SE_CLK_SEL, 0);
+	w32(SE + SE_M_CLK_CFG, (2U << 4) | 1U);
+	w32(SE + SE_I2C_SCL, (5U << 20) | (12U << 10) | 24U);
+
+	/* Chip ID: 0xFA + hw address 0x20000000, one dummy byte first. */
+	static const uint8_t id_cmd[5] = { 0xfa, 0x20, 0x00, 0x00, 0x00 };
+	uint8_t id[4] = { 0 };
+	int rc = fts_read(id_cmd, sizeof(id_cmd), id, sizeof(id));
+	p = fmt_str(buf, rc ? "chip id read failed rc=" : "chip id ");
+	if (rc) {
+		p = fmt_dec(p, (uint64_t)(-rc));
+		p = fmt_str(p, " status=");
+		fmt_hex(p, i2c_status, 8);
+	} else {
+		for (int i = 0; i < 4; i++) {
+			p = fmt_hex(p, id[i], 2);
+			p = fmt_str(p, " ");
+		}
+	}
+	con_line("FTS", buf);
+	if (rc)
+		return;
+
+	/* Event FIFO for 20 s: tap the screen. */
+	con_line("", "tap the screen now (20 s)");
+	int row = con_row();
+	unsigned events = 0;
+	uint64_t end = now() + ticks_per_s() * LIVE_SECONDS / 3;
+	static const uint8_t fifo_cmd[1] = { 0x86 };
+	while (now() < end) {
+		uint8_t e[8] = { 0 };
+		if (fts_read(fifo_cmd, 1, e, 8) == 0 && e[0]) {
+			events++;
+			p = fmt_dec(buf, events);
+			p = fmt_str(p, ": ");
+			for (int i = 0; i < 8; i++) {
+				p = fmt_hex(p, e[i], 2);
+				p = fmt_str(p, " ");
+			}
+			con_at(0, row, buf, C_YELLOW, C_BLACK);
+		}
+		spin_us(10000);
+	}
+	if (!events)
+		con_at(0, row, "no events (chip not scanning?)", C_WHITE, C_BLACK);
+	con_set_row(row + 1);
 }
 
 /* ---- SPMI PMIC arbiter v5, read-only ---- */
@@ -249,6 +439,10 @@ void entry_main(uintptr_t dtb, uintptr_t load)
 	con_set_row(2);
 	show_touch(dtb);
 	con_skip();
+#ifndef QEMU
+	show_touch_bus();
+	con_skip();
+#endif
 #ifdef QEMU
 	con_line("SPMI", "skipped in QEMU (no PMIC arbiter)");
 #else
