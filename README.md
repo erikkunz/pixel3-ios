@@ -349,6 +349,17 @@ NACK). Next suspect: FIFO interface disabled for this SE
 (`SE_GENI_IF_DISABLE_RO` 0x064, as Linux checks), which would mean GPI DMA.
 Volume up: GPIO 6 STATUS1 reads `0x81` released and pressed alike.
 
+**SMP hardware fully checked (probe, 2026-10-21):** SGI 1 sent from core 0
+with XNU's encoding (`ICC_SGI1R` Aff1 = core, TargetList bit 0) reaches
+every core in 4-7 us (Gold included), on top of synchronized counters,
+working timer IRQs and the event stream. The 8-core hangs (Gold cores
+never take an IPI in XNU) are therefore in XNU's SMP path with MMU and
+caches on, not the hardware. iOS boots stay on `cpus=1` meanwhile.
+
+**Migration boot on 1 core hangs at `usermanagerd`:** keybag task done
+(`DONE MKB_INIT`), launchd execs `usermanagerd` (16:00:56) and nothing
+follows for minutes; no crash. Next boot samples `usermanagerd`.
+
 ### Wi-Fi: what it would take (research, nothing built)
 
 The Pixel 3's Wi-Fi is the WCN3990 on SDM845's SNOC bus (Linux `ath10k_snoc`).
