@@ -1,0 +1,115 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 27184ab..7bcbf60 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/blueline_keys.c			standard
+ bsd/dev/blueline_touch.c		standard
++bsd/dev/blueline_cpufreq.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/blueline_cpufreq.c b/bsd/dev/blueline_cpufreq.c
+new file mode 100644
+index 0000000..3d5b266
+--- /dev/null
++++ b/bsd/dev/blueline_cpufreq.c
+@@ -0,0 +1,77 @@
++/*
++ * Pixel 3 (blueline) CPU clocks: ask SDM845's CPU frequency firmware
++ * ("cpufreq-hw", one controller per cluster) for its highest regular
++ * performance level. Without this the cores run at whatever level the
++ * bootloader left. Same register interface as Linux's qcom-cpufreq-hw:
++ * frequency table at +0x110 (40 rows of 32 bytes; 19.2 MHz * L_VAL, a
++ * repeated frequency ends it, core count 1 marks turbo), requested index at
++ * +0x920 (+4 per core with per-core DCVS). The firmware applies it within
++ * its own voltage and thermal limits. Boot-arg bluecpufreq=0: leave as is.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void blueline_cpufreq_init(void);
++
++#define REG_ENABLE	0x000u
++#define REG_DCVS_CTRL	0x0bcu
++#define REG_FREQ_LUT	0x110u
++#define REG_PERF_STATE	0x920u
++#define LUT_ROWS	40u
++#define LUT_ROW		32u
++#define XO_KHZ		19200u
++
++static void
++cpufreq_domain(unsigned d, vm_offset_t pa)
++{
++	vm_offset_t base = ml_io_map(pa, 0x1400);
++	if (!base) {
++		return;
++	}
++	volatile uint32_t *r = (volatile uint32_t *)base;
++	if (!(r[REG_ENABLE / 4] & 1u)) {
++		printf("BLUELINE CPUFREQ: cluster %u controller not enabled; left as is\n", d);
++		return;
++	}
++	uint32_t best = 0, best_khz = 0, prev_khz = 0, rows = 0;
++	for (uint32_t i = 0; i < LUT_ROWS; i++) {
++		uint32_t row = r[(REG_FREQ_LUT + i * LUT_ROW) / 4];
++		uint32_t src = row >> 30, lval = row & 0xffu, cores = (row >> 16) & 7u;
++		uint32_t khz = src ? XO_KHZ * lval : 0;	/* src 0: fixed 300 MHz-class clock */
++		if (i > 0 && khz == prev_khz) {
++			break;				/* end of table */
++		}
++		prev_khz = khz;
++		rows = i + 1;
++		if (cores != 1 && khz > best_khz) {	/* skip turbo rows */
++			best = i;
++			best_khz = khz;
++		}
++	}
++	uint32_t old = r[REG_PERF_STATE / 4];
++	bool per_core = r[REG_DCVS_CTRL / 4] & 1u;
++	for (unsigned c = 0; c < (per_core ? 4u : 1u); c++) {
++		r[REG_PERF_STATE / 4 + c] = best;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("BLUELINE CPUFREQ: cluster %u: %u levels, was %u, now %u = %u MHz%s\n",
++	    d, rows, old, best, best_khz / 1000, per_core ? " (per core)" : "");
++}
++
++void
++blueline_cpufreq_init(void)
++{
++	int enabled = 1;
++	(void)PE_parse_boot_argn("bluecpufreq", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("BLUELINE CPUFREQ: left at the bootloader's levels (bluecpufreq=0)\n");
++		return;
++	}
++	cpufreq_domain(0, 0x17d43000u);		/* Silver: cpu0-3 */
++	cpufreq_domain(1, 0x17d45800u);		/* Gold: cpu4-7 */
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index f249198..6f28aff 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -49,6 +49,7 @@ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void blueline_keys_init(void);
+ extern void blueline_touch_init(void);
++extern void blueline_cpufreq_init(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -602,6 +603,7 @@ sweet_ufs_init(void)
+ 	sweet_log_start();
+ 	sweet_sample_start();
+ 	/* Pixel 3 hardware keys (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
++	blueline_cpufreq_init();
+ 	blueline_keys_init();
+ 	blueline_touch_init();
+ 	return 0;
