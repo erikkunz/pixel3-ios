@@ -1,0 +1,533 @@
+From 58d064f63d9c1a6db8b73d9979bd65a3fadffc4e Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Thu, 22 Oct 2026 22:45:19 +0200
+Subject: [PATCH] 0113: blueline touch: bit-banged I2C, LDO19 via RPMh, FTM5
+ start-up
+
+---
+ bsd/dev/blueline_touch.c | 438 ++++++++++++++++++++++++++++-----------
+ 1 file changed, 319 insertions(+), 119 deletions(-)
+
+diff --git a/bsd/dev/blueline_touch.c b/bsd/dev/blueline_touch.c
+index d859fe6..cdeb097 100644
+--- a/bsd/dev/blueline_touch.c
++++ b/bsd/dev/blueline_touch.c
+@@ -1,19 +1,32 @@
+ /*
+- * Pixel 3 (blueline) touchscreen: ST FTS ("st,fts" at I2C 0x49) on the
+- * GENI I2C engine QUP wrapper 0 / SE2 (i2c@888000), polled every 10 ms,
+- * contacts passed to the HID services (iokit/Kernel/arm/hid/SweetHID.cpp)
+- * in panel pixels (1080x2160).
++ * Pixel 3 (blueline) touchscreen: ST FTM5 ("st,fts", chip id 36 39) at I2C
++ * 0x49, contacts passed to the HID services (iokit/Kernel/arm/hid/SweetHID.cpp)
++ * in panel pixels (1080x2160). Shown working by the p3-input probe first.
+  *
+- * Off by default until the p3-input probe has shown the chip answering:
+- * boot-arg bluetouch=1 turns it on. Writes: GCC clock votes for wrapper 0
+- * AHB and SE2 plus the SE2 clock source (crystal), the TLMM mux of GPIO
+- * 27/28 to qup2, and the serial engine's registers. The chip only gets
+- * read commands (no reset, no power or scan-mode changes): it must already
+- * be sensing.
++ * The bus: i2c@888000 (QUP wrapper 0, SE2) has its FIFO interface disabled,
++ * and its GPI DMA path takes the SoC down on the first descriptor fetch, so
++ * the bus is bit-banged on the SE's own pins (as HackiOS drives its panel's
++ * SPI): GPIO 27 SDA, 28 SCL, open drain by switching the output enable with
++ * the output held low, pull-ups on, ~100 kHz, interrupts masked during each
++ * transfer. GPIO 136 (st,switch_gpio) high gives the bus to us, not the
++ * sensor hub.
+  *
+- * FTS event FIFO (command 0x86, 8-byte events, byte 7 bits 4:0 = events
+- * still queued): byte 0 high nibble 1 enter, 2 motion, 3 leave; byte 1 =
+- * id << 4 | type (1 finger); x = (b3 & 0xf) << 8 | b2, y = b4 << 4 | b3 >> 4.
++ * Power: avdd-supply is PM8998 LDO19 (3.3 V), owned by the AOP and off after
++ * the bootloader; the chip then answers and scans but never sees a finger.
++ * It is asked for over RPMh as Linux does (cmd-db.c, rpmh-rsc.c,
++ * qcom-rpmh-regulator.c): "ldoa19" looked up in the AOP's command database,
++ * then voltage, mode HPM and enable in one active TCS of the apps RSC (DRV 2).
++ *
++ * Start-up as Google's driver resumes the chip (stm/fts.c fts_resume_work):
++ * system reset (0x20000024 = 0x80), wait for "controller ready" (0x03),
++ * interrupt enable (0x20000029 = 0x41), scan mode active with every scan the
++ * config supports (A0 00 FF).
++ *
++ * Events (command 0x86, 8 bytes each, byte 7 bits 4:0 = events still queued):
++ * byte 0 high nibble 1 enter, 2 motion, 3 leave; byte 1 = id << 4 | type
++ * (1 finger); x = (b3 & 0xf) << 8 | b2, y = b4 << 4 | b3 >> 4. Read while
++ * the IRQ line (GPIO 125, active low) says events are pending, and every
++ * 100 ms regardless. Boot-arg bluetouch=0 turns all of this off.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -28,35 +41,24 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ void blueline_touch_init(void);
+ 
+-#define GCC_PA		0x00100000u
+-#define GCC_VOTE	0x5200cu	/* bits 6 m_ahb, 7 s_ahb, 12 SE2 */
+-#define GCC_S2_RCG	0x17294u
+-#define TLMM_EAST_PA	0x03500000u
+-#define SE_PA		0x00888000u
+-
+-#define SE_FW_REV	0x068u
+-#define SE_M_CLK_CFG	0x048u
+-#define SE_CLK_SEL	0x07cu
+-#define SE_DMA_MODE	0x258u
+-#define SE_TX_PACK0	0x260u
+-#define SE_TX_PACK1	0x264u
+-#define SE_I2C_TX_LEN	0x26cu
+-#define SE_I2C_RX_LEN	0x270u
+-#define SE_I2C_SCL	0x278u
+-#define SE_RX_PACK0	0x284u
+-#define SE_RX_PACK1	0x288u
+-#define SE_M_CMD0	0x600u
+-#define SE_M_IRQ_STAT	0x610u
+-#define SE_M_IRQ_CLR	0x618u
+-#define SE_TX_FIFO	0x700u
+-#define SE_RX_FIFO	0x780u
+-#define SE_RX_FIFO_ST	0x804u
+-#define M_CMD_DONE	(1u << 0)
+-#define M_ERRORS	(0x0eu | (0x3fu << 9))
++#define TLMM_EAST_PA	0x03500000u	/* GPIO 27, 28, 125 */
++#define TLMM_NORTH_PA	0x03900000u	/* GPIO 136 */
++#define GPIO_CFG(n)	(0x1000u * (n))
++#define GPIO_IO(n)	(0x1000u * (n) + 4u)
++#define BB_SDA		27
++#define BB_SCL		28
++#define TOUCH_IRQ	125
++#define TOUCH_SWITCH	136
++
++#define RSC_DRV_PA	0x179e0000u	/* apps RSC, DRV 2; TCSes at +0xd00 */
++#define RSC_TCS		0xd00u
++#define TCS_STRIDE	0x2a0u
++#define CMDDB_LOC_PA	0x0c3f000cu	/* AOP message RAM: cmd-db address, size */
++
+ #define FTS_ADDR	0x49u
+ #define MAX_FINGERS	10
+ 
+-static vm_offset_t se;
++static vm_offset_t east, north, rsc;
+ static int touch_chan;
+ 
+ static uint32_t
+@@ -74,87 +76,286 @@ wr(vm_offset_t a, uint32_t v)
+ 	*(volatile uint32_t *)a = v;
+ }
+ 
++/* ---- I2C, bit-banged ---- */
++
++static void
++bb_pin(int pin, int high)
++{
++	/* released: input with pull-up; low: output enabled, driving 0 */
++	wr(east + GPIO_CFG(pin), (high ? 0u : (1u << 9)) | (2u << 6) | 3u);
++}
++
++static int
++bb_get(int pin)
++{
++	return rd(east + GPIO_IO(pin)) & 1;
++}
++
++static void
++bb_scl_high(void)
++{
++	bb_pin(BB_SCL, 1);
++	for (int i = 0; i < 1000 && !bb_get(BB_SCL); i++) {	/* clock stretching, 1 ms at most */
++		delay(1);
++	}
++}
++
++static void
++bb_start(void)
++{
++	bb_pin(BB_SDA, 1);
++	bb_scl_high();
++	delay(5);
++	bb_pin(BB_SDA, 0);
++	delay(5);
++	bb_pin(BB_SCL, 0);
++	delay(5);
++}
++
++static void
++bb_stop(void)
++{
++	bb_pin(BB_SDA, 0);
++	delay(5);
++	bb_scl_high();
++	delay(5);
++	bb_pin(BB_SDA, 1);
++	delay(5);
++}
++
++static int
++bb_write(uint8_t b)
++{
++	for (int i = 7; i >= 0; i--) {
++		bb_pin(BB_SDA, b >> i & 1);
++		delay(5);
++		bb_scl_high();
++		delay(5);
++		bb_pin(BB_SCL, 0);
++	}
++	bb_pin(BB_SDA, 1);
++	delay(5);
++	bb_scl_high();
++	int nack = bb_get(BB_SDA);
++	delay(5);
++	bb_pin(BB_SCL, 0);
++	return nack ? EIO : 0;
++}
++
++static uint8_t
++bb_read(int ack)
++{
++	uint8_t b = 0;
++
++	bb_pin(BB_SDA, 1);
++	for (int i = 0; i < 8; i++) {
++		delay(5);
++		bb_scl_high();
++		b = (uint8_t)(b << 1 | bb_get(BB_SDA));
++		delay(5);
++		bb_pin(BB_SCL, 0);
++	}
++	bb_pin(BB_SDA, !ack);
++	delay(5);
++	bb_scl_high();
++	delay(5);
++	bb_pin(BB_SCL, 0);
++	bb_pin(BB_SDA, 1);
++	return b;
++}
++
++/* Write cmd, then (if len) a repeated start and read len bytes. */
+ static int
+-i2c_msg(bool read, const uint8_t *tx, uint8_t *rx, uint32_t len, bool stretch)
+-{
+-	wr(se + SE_M_IRQ_CLR, 0xffffffffu);
+-	wr(se + (read ? SE_I2C_RX_LEN : SE_I2C_TX_LEN), len);
+-	wr(se + SE_M_CMD0, ((read ? 2u : 1u) << 27) | (FTS_ADDR << 9) | (stretch ? 4u : 0u));
+-	for (uint32_t i = 0; !read && i < len; i += 4) {
+-		uint32_t word = 0;
+-		for (uint32_t b = 0; b < 4 && i + b < len; b++) {
+-			word |= (uint32_t)tx[i + b] << (8 * b);
++fts_xfer(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
++{
++	boolean_t intr = ml_set_interrupts_enabled(FALSE);
++	int err = 0;
++
++	bb_start();
++	err = bb_write(FTS_ADDR << 1);
++	for (uint32_t i = 0; i < clen && !err; i++) {
++		err = bb_write(cmd[i]);
++	}
++	if (!err && len) {
++		bb_start();
++		err = bb_write(FTS_ADDR << 1 | 1);
++		for (uint32_t i = 0; i < len && !err; i++) {
++			out[i] = bb_read(i + 1 < len);
+ 		}
+-		wr(se + SE_TX_FIFO, word);
+ 	}
+-	uint32_t st = 0;
+-	for (unsigned n = 0; n < 20000; n++) {	/* ~20 ms */
+-		st = rd(se + SE_M_IRQ_STAT);
+-		if (st & (M_CMD_DONE | M_ERRORS)) {
++	bb_stop();
++	ml_set_interrupts_enabled(intr);
++	return err;
++}
++
++/* ---- RPMh: LDO19 from the AOP ---- */
++
++static uint8_t
++rd8(vm_offset_t a)
++{
++	return *(volatile uint8_t *)a;
++}
++
++static uint32_t
++cmddb_addr(const char *id)
++{
++	vm_offset_t loc = ml_io_map(CMDDB_LOC_PA & ~0xfffu, 0x1000);
++	if (!loc) {
++		return 0;
++	}
++	uint32_t pa = rd(loc + (CMDDB_LOC_PA & 0xfffu)), size = rd(loc + (CMDDB_LOC_PA & 0xfffu) + 4);
++	if (!pa || size < 0x1000 || size > 0x100000) {
++		return 0;
++	}
++	vm_offset_t db = ml_io_map(pa, size);
++	if (!db || rd(db + 4) != 0x0c0330dbu) {		/* magic db 30 03 0c */
++		return 0;
++	}
++	for (uint32_t i = 0; i < 8; i++) {
++		vm_offset_t h = db + 8 + 16 * i;	/* rsc_hdr: slv_id, header_offset, data_offset, cnt */
++		uint32_t slv = rd8(h) | (uint32_t)rd8(h + 1) << 8;
++		if (!slv) {
+ 			break;
+ 		}
+-		delay(1);
++		uint32_t hoff = rd8(h + 2) | (uint32_t)rd8(h + 3) << 8;
++		uint32_t cnt = rd8(h + 6) | (uint32_t)rd8(h + 7) << 8;
++		vm_offset_t e = db + 144 + hoff;	/* entry_header: id[8], priority[2], addr, len, offset */
++		for (uint32_t j = 0; j < cnt && 144 + hoff + 24 * (j + 1) <= size; j++, e += 24) {
++			bool same = true;
++			for (int k = 0; k < 8 && same; k++) {
++				same = rd8(e + k) == (uint8_t)id[k];
++				if (!id[k]) {
++					break;
++				}
++			}
++			if (same) {
++				return rd(e + 16);
++			}
++		}
+ 	}
+-	wr(se + SE_M_IRQ_CLR, st);
+-	if (!(st & M_CMD_DONE) || (st & M_ERRORS)) {
+-		return EIO;
++	return 0;
++}
++
++/* n commands (addr, data) in an idle active TCS, triggered and waited for. */
++static int
++rpmh_write(const uint32_t *addr, const uint32_t *data, int n)
++{
++	uint32_t cstride = (rd(rsc) >> 16 & 0xffu) >= 3 ? 24 : 20;
++	int t = -1;
++
++	for (int i = 0; i < 2 && t < 0; i++) {
++		vm_offset_t b = rsc + RSC_TCS + TCS_STRIDE * (uint32_t)i;
++		if (rd(b + 0x18) && !rd(b + 0x14) && !rd(b + 0x1c)) {	/* idle, no control, no commands */
++			t = i;
++		}
++	}
++	if (t < 0) {
++		return EBUSY;
++	}
++	vm_offset_t b = rsc + RSC_TCS + TCS_STRIDE * (uint32_t)t;
++	wr(rsc + RSC_TCS + 0x08, 1u << t);		/* IRQ_CLEAR */
++	for (int i = 0; i < n; i++) {
++		wr(b + 0x30 + cstride * (uint32_t)i, 8u | (1u << 16) | (1u << 8));	/* write, response */
++		wr(b + 0x34 + cstride * (uint32_t)i, addr[i]);
++		wr(b + 0x38 + cstride * (uint32_t)i, data[i]);
+ 	}
+-	if (read) {
+-		uint32_t words = rd(se + SE_RX_FIFO_ST) & 0x1ffffffu, got = 0;
+-		for (uint32_t i = 0; i < words; i++) {
+-			uint32_t word = rd(se + SE_RX_FIFO);
+-			for (uint32_t b = 0; b < 4 && got < len; b++) {
+-				rx[got++] = (uint8_t)(word >> (8 * b));
++	wr(b + 0x1c, (1u << n) - 1);			/* CMD_ENABLE */
++	wr(b + 0x14, 0);				/* CONTROL: AMC on, then trigger */
++	wr(b + 0x14, 1u << 16);
++	wr(b + 0x14, (1u << 16) | (1u << 24));
++	bool done = false;
++	for (int us = 0; us < 50000 && !done; us++) {
++		done = true;
++		for (int i = 0; i < n; i++) {
++			if (!(rd(b + 0x3c + cstride * (uint32_t)i) & (1u << 16))) {	/* completed */
++				done = false;
+ 			}
+ 		}
+-		if (got < len) {
+-			return EIO;
+-		}
++		delay(1);
+ 	}
+-	return 0;
++	wr(b + 0x1c, 0);
++	wr(b + 0x14, 0);
++	wr(rsc + RSC_TCS + 0x08, 1u << t);
++	return done ? 0 : ETIMEDOUT;
+ }
+ 
+ static int
+-fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
++touch_power(void)
+ {
+-	int err = i2c_msg(false, cmd, NULL, clen, true);
+-	return err ? err : i2c_msg(true, NULL, out, len, false);
++	uint32_t a = cmddb_addr("ldoa19");
++	if (!a) {
++		printf("BLUELINE TOUCH: ldoa19 not in cmd-db\n");
++		return ENOENT;
++	}
++	/* pmic4 pldo: 3.3 V, mode HPM (7), then enable */
++	const uint32_t addr[3] = { a + 0, a + 8, a + 4 };
++	const uint32_t data[3] = { 3300, 7, 1 };
++	int err = rpmh_write(addr, data, 3);
++	printf("BLUELINE TOUCH: RPMh ldoa19 (%#x) 3300 mV HPM on: err=%d\n", a, err);
++	delay(20000);
++	return err;
++}
++
++/* ---- FTM5 ---- */
++
++static const uint8_t fifo_cmd[1] = { 0x86 };
++
++static void
++fts_start(void)
++{
++	static const uint8_t reset[6] = { 0xfa, 0x20, 0x00, 0x00, 0x24, 0x80 };
++	static const uint8_t irq_on[6] = { 0xfa, 0x20, 0x00, 0x00, 0x29, 0x41 };
++	static const uint8_t sense_on[3] = { 0xa0, 0x00, 0xff };
++	uint8_t e[8];
++	bool ready = false;
++
++	int e0 = fts_xfer(reset, sizeof(reset), NULL, 0);
++	for (int i = 0; i < 50 && !ready; i++) {
++		delay(10000);
++		ready = fts_xfer(fifo_cmd, 1, e, 8) == 0 && e[0] == 0x03;
++	}
++	int e1 = fts_xfer(irq_on, sizeof(irq_on), NULL, 0);
++	int e2 = fts_xfer(sense_on, sizeof(sense_on), NULL, 0);
++	printf("BLUELINE TOUCH: reset err=%d %s, irq err=%d, sense on err=%d\n",
++	    e0, ready ? "ready" : "NOT ready", e1, e2);
+ }
+ 
+ static void
+ touch_thread(__unused void *arg, __unused wait_result_t wr_)
+ {
+-	static const uint8_t fifo_cmd[1] = { 0x86 };
+ 	uint8_t buf[8 * 32];
+ 	uint32_t down = 0;
+ 	int x[MAX_FINGERS] = { 0 }, y[MAX_FINGERS] = { 0 };
+-	unsigned errors = 0;
++	unsigned errors = 0, ticks = 0;
+ 
+ 	for (;;) {
+-		int err = fts_read(fifo_cmd, 1, buf, 8);
+-		if (!err && buf[0] != 0) {
+-			unsigned more = buf[7] & 0x1fu;
+-			if (more && fts_read(fifo_cmd, 1, buf + 8, more * 8u)) {
+-				more = 0;
+-			}
+-			for (unsigned e = 0; e <= more; e++) {
+-				const uint8_t *ev = buf + 8 * e;
+-				unsigned kind = ev[0] >> 4, id = ev[1] >> 4, type = ev[1] & 0xfu;
+-				if (id >= MAX_FINGERS) {
+-					continue;
++		/* IRQ low: events pending; otherwise only every 100 ms (or while a finger is down) */
++		if (!(rd(east + GPIO_IO(TOUCH_IRQ)) & 1) || down || (++ticks % 10u) == 0) {
++			int err = fts_xfer(fifo_cmd, 1, buf, 8);
++			if (!err && buf[0] != 0) {
++				unsigned more = buf[7] & 0x1fu;
++				if (more > 31u || (more && fts_xfer(fifo_cmd, 1, buf + 8, more * 8u))) {
++					more = 0;
+ 				}
+-				if ((kind == 1 || kind == 2) && type != 0 && type != 3) {
+-					x[id] = ((ev[3] & 0xf) << 8) | ev[2];
+-					y[id] = (ev[4] << 4) | (ev[3] >> 4);
+-					down |= 1u << id;
+-					sweet_hid_touch((int)id, 1, x[id], y[id]);
+-				} else if (kind == 3 && (down & (1u << id))) {
+-					down &= ~(1u << id);
+-					sweet_hid_touch((int)id, 0, x[id], y[id]);
++				for (unsigned e = 0; e <= more; e++) {
++					const uint8_t *ev = buf + 8 * e;
++					unsigned kind = ev[0] >> 4, id = ev[1] >> 4, type = ev[1] & 0xfu;
++					if ((ev[0] & 0xfu) != 3 || id >= MAX_FINGERS) {
++						continue;
++					}
++					if ((kind == 1 || kind == 2) && type != 0 && type != 3) {
++						x[id] = ((ev[3] & 0xf) << 8) | ev[2];
++						y[id] = (ev[4] << 4) | (ev[3] >> 4);
++						down |= 1u << id;
++						sweet_hid_touch((int)id, 1, x[id], y[id]);
++					} else if (kind == 3 && (down & (1u << id))) {
++						down &= ~(1u << id);
++						sweet_hid_touch((int)id, 0, x[id], y[id]);
++					}
+ 				}
++			} else if (err && (errors++ % 500u) == 0) {
++				printf("BLUELINE TOUCH: FIFO read error\n");
+ 			}
+-		} else if (err && (errors++ % 500u) == 0) {
+-			printf("BLUELINE TOUCH: FIFO read error\n");
+ 		}
+ 		uint64_t deadline;
+ 		clock_interval_to_deadline(10, NSEC_PER_MSEC, &deadline);
+@@ -167,7 +368,7 @@ void
+ blueline_touch_init(void)
+ {
+ 	static bool started;
+-	int enabled = 0;
++	int enabled = 1;
+ 	thread_t thread;
+ 
+ 	if (started) {
+@@ -176,44 +377,43 @@ blueline_touch_init(void)
+ 	started = true;
+ 	(void)PE_parse_boot_argn("bluetouch", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+-		printf("BLUELINE TOUCH: off (bluetouch=1 to enable)\n");
++		printf("BLUELINE TOUCH: off (bluetouch=0)\n");
+ 		return;
+ 	}
+-	vm_offset_t gcc = ml_io_map(GCC_PA, 0x60000);
+-	vm_offset_t tlmm = ml_io_map(TLMM_EAST_PA, 0x20000);
+-	se = ml_io_map(SE_PA, 0x4000);
+-	if (!gcc || !tlmm || !se) {
++	east = ml_io_map(TLMM_EAST_PA, GPIO_CFG(TOUCH_IRQ + 1));
++	north = ml_io_map(TLMM_NORTH_PA, GPIO_CFG(TOUCH_SWITCH + 1));
++	rsc = ml_io_map(RSC_DRV_PA, 0x4000);
++	if (!east || !north || !rsc) {
+ 		printf("BLUELINE TOUCH: MMIO mapping failed\n");
+ 		return;
+ 	}
+-	wr(gcc + GCC_VOTE, rd(gcc + GCC_VOTE) | (1u << 6) | (1u << 7) | (1u << 12));
+-	wr(gcc + GCC_S2_RCG + 4, 1u);			/* crystal, divider 1 */
+-	wr(gcc + GCC_S2_RCG, rd(gcc + GCC_S2_RCG) | 1u);
+-	delay(100);
+-	wr(tlmm + 0x1000u * 27, 1u << 2);		/* GPIO 27/28: qup2 */
+-	wr(tlmm + 0x1000u * 28, 1u << 2);
+-	uint32_t fw = rd(se + SE_FW_REV);
+-	if (((fw >> 8) & 0xffu) != 3) {
+-		printf("BLUELINE TOUCH: SE2 firmware %#x is not I2C\n", fw);
+-		return;
++	/* bus to the AP: switch GPIO 136 driven high */
++	wr(north + GPIO_IO(TOUCH_SWITCH), 2u);
++	wr(north + GPIO_CFG(TOUCH_SWITCH), 1u << 9);
++	/* SDA/SCL as plain GPIOs, output value 0, released */
++	wr(east + GPIO_IO(BB_SDA), 0);
++	wr(east + GPIO_IO(BB_SCL), 0);
++	bb_pin(BB_SDA, 1);
++	bb_pin(BB_SCL, 1);
++	delay(1000);
++	for (int i = 0; i < 9; i++) {			/* free a device stuck mid-byte */
++		bb_pin(BB_SCL, 0);
++		delay(5);
++		bb_scl_high();
++		delay(5);
+ 	}
+-	wr(se + SE_DMA_MODE, 0);
+-	wr(se + SE_TX_PACK0, 0x0004380eu);
+-	wr(se + SE_TX_PACK1, 0x000c3e0eu);
+-	wr(se + SE_RX_PACK0, 0x0004380eu);
+-	wr(se + SE_RX_PACK1, 0x000c3e0eu);
+-	wr(se + SE_CLK_SEL, 0);
+-	wr(se + SE_M_CLK_CFG, (2u << 4) | 1u);		/* 400 kHz from 19.2 MHz */
+-	wr(se + SE_I2C_SCL, (5u << 20) | (12u << 10) | 24u);
++	bb_stop();
+ 
+ 	static const uint8_t id_cmd[5] = { 0xfa, 0x20, 0x00, 0x00, 0x00 };
+ 	uint8_t id[4] = { 0 };
+-	if (fts_read(id_cmd, sizeof(id_cmd), id, sizeof(id))) {
++	if (fts_xfer(id_cmd, sizeof(id_cmd), id, sizeof(id))) {
+ 		printf("BLUELINE TOUCH: no answer from FTS at 0x49; touch off\n");
+ 		return;
+ 	}
+-	printf("BLUELINE TOUCH: FTS chip id %02x %02x %02x %02x, polling every 10 ms\n",
++	printf("BLUELINE TOUCH: FTS chip id %02x %02x %02x %02x (bit-banged I2C)\n",
+ 	    id[0], id[1], id[2], id[3]);
++	(void)touch_power();
++	fts_start();
+ 	if (kernel_thread_start(touch_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+-- 
+2.54.0 (Apple Git-157)
+
