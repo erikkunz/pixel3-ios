@@ -1155,6 +1155,128 @@ static int spmi_write(uint16_t apid, uint16_t addr, uint8_t val)
  */
 #define L19_PPID	0x052U		/* SID 0, peripheral 0x52 (LDO1 = 0x40) */
 
+/*
+ * ---- RPMh: ask the AOP for a regulator (LDO19 belongs to it, not to us) ----
+ * Linux's way (drivers/soc/qcom/cmd-db.c, rpmh-rsc.c, qcom-rpmh-regulator.c):
+ * the resource's address from the AOP's command database, then one "active"
+ * TCS of the apps RSC (DRV 2: 0x179e0000, TCSes at +0xd00, two active ones
+ * first per qcom,tcs-config) with VRM writes: mV at +0, enable at +4, mode at
+ * +8. Polled: each command's status reports "completed".
+ */
+#define RSC_DRV		0x179e0000UL
+#define RSC_TCS		0x179e0d00UL
+#define TCS_STRIDE	0x2a0UL
+#define CMDDB_LOC	0x0c3f000cUL		/* AOP message RAM: cmd-db address, size */
+
+static uint8_t rd8(uintptr_t a)
+{
+	return *(volatile uint8_t *)a;
+}
+
+static uint32_t cmddb_addr(const char *id)
+{
+	uintptr_t db = rd32(CMDDB_LOC);
+
+	if (!db || rd32(db + 4) != 0x0c0330dbU)		/* magic db 30 03 0c */
+		return 0;
+	for (uint32_t i = 0; i < 8; i++) {
+		uintptr_t h = db + 8 + 16 * i;		/* rsc_hdr: slv_id, header_offset, data_offset, cnt */
+		uint32_t slv = rd8(h) | (uint32_t)rd8(h + 1) << 8;
+		if (!slv)
+			break;
+		uint32_t hoff = rd8(h + 2) | (uint32_t)rd8(h + 3) << 8;
+		uint32_t cnt = rd8(h + 6) | (uint32_t)rd8(h + 7) << 8;
+		uintptr_t e = db + 144 + hoff;		/* entry_header: id[8], priority[2], addr, len, offset */
+		for (uint32_t j = 0; j < cnt; j++, e += 24) {
+			int same = 1;
+			for (int k = 0; k < 8 && same; k++) {
+				char c = id[k];
+				same = rd8(e + k) == (uint8_t)c;
+				if (!c)
+					break;
+			}
+			if (same)
+				return rd32(e + 16);
+		}
+	}
+	return 0;
+}
+
+/* n commands (addr, data) in one active TCS, fire-and-wait; <0 on failure. */
+static int rpmh_write(const uint32_t *addr, const uint32_t *data, int n, char *buf)
+{
+	uint32_t cstride = (rd32(RSC_DRV) >> 16 & 0xff) >= 3 ? 24 : 20;
+	int t = -1;
+	char *p;
+
+	for (int i = 0; i < 2 && t < 0; i++) {
+		uintptr_t b = RSC_TCS + TCS_STRIDE * (uint32_t)i;
+		if (rd32(b + 0x18) && !rd32(b + 0x14) && !rd32(b + 0x1c))	/* idle, no control, no commands */
+			t = i;
+	}
+	p = fmt_str(buf, "rsc ver=");
+	p = fmt_hex(p, rd32(RSC_DRV), 8);
+	p = fmt_str(p, " tcs0 st=");
+	p = fmt_hex(p, rd32(RSC_TCS + 0x18), 1);
+	p = fmt_str(p, " tcs1 st=");
+	p = fmt_hex(p, rd32(RSC_TCS + TCS_STRIDE + 0x18), 1);
+	p = fmt_str(p, " using ");
+	fmt_dec(p, (uint64_t)(t + 1));
+	con_line("", buf);
+	if (t < 0)
+		return -1;
+	uintptr_t b = RSC_TCS + TCS_STRIDE * (uint32_t)t;
+	w32(RSC_TCS + 0x08, 1U << t);			/* IRQ_CLEAR */
+	for (int i = 0; i < n; i++) {
+		w32(b + 0x30 + cstride * (uint32_t)i, 8U | (1U << 16) | (1U << 8));	/* write, 8 bytes, response */
+		w32(b + 0x34 + cstride * (uint32_t)i, addr[i]);
+		w32(b + 0x38 + cstride * (uint32_t)i, data[i]);
+	}
+	w32(b + 0x1c, (1U << n) - 1);			/* CMD_ENABLE */
+	__asm__ volatile("dsb sy" ::: "memory");
+	w32(b + 0x14, 0);				/* CONTROL: AMC off, then on, then trigger */
+	w32(b + 0x14, 1U << 16);
+	w32(b + 0x14, (1U << 16) | (1U << 24));
+	uint64_t end = now() + ticks_per_s() / 20;
+	int done = 0;
+	while (!done && now() < end) {
+		done = 1;
+		for (int i = 0; i < n; i++)
+			if (!(rd32(b + 0x3c + cstride * (uint32_t)i) & (1U << 16)))	/* CMD_STATUS: completed */
+				done = 0;
+	}
+	p = fmt_str(buf, done ? "rpmh done: st=" : "rpmh TIMEOUT: st=");
+	for (int i = 0; i < n; i++) {
+		p = fmt_hex(p, rd32(b + 0x3c + cstride * (uint32_t)i), 5);
+		p = fmt_str(p, " ");
+	}
+	fmt_hex(p, rd32(RSC_TCS + 0x04), 2);		/* IRQ_STATUS */
+	con_line("", buf);
+	w32(b + 0x1c, 0);				/* as Linux's completion: commands off, IRQ cleared */
+	w32(b + 0x14, 0);
+	w32(RSC_TCS + 0x08, 1U << t);
+	return done ? 0 : -2;
+}
+
+static void touch_avdd_rpmh(void)
+{
+	char buf[96], *p;
+	uint32_t a = cmddb_addr("ldoa19");
+
+	p = fmt_str(buf, "cmd-db at ");
+	p = fmt_hex(p, rd32(CMDDB_LOC), 8);
+	p = fmt_str(p, " ldoa19 addr=");
+	fmt_hex(p, a, 5);
+	con_line("RPMH", buf);
+	if (!a)
+		return;
+	/* pmic4 pldo: 3.3 V, mode HPM (7), then enable */
+	const uint32_t addr[3] = { a + 0, a + 8, a + 4 };
+	const uint32_t data[3] = { 3300, 7, 1 };
+	if (rpmh_write(addr, data, 3, buf) == 0)
+		spin_us(20000);			/* LDO ramp and the panel's analog side */
+}
+
 static void touch_avdd(void)
 {
 	char buf[96], *p;
@@ -1190,7 +1312,9 @@ static void touch_avdd(void)
 	if (en & 0x80)
 		return;
 	if (owner != 0 || mv < 3000 || mv > 3400) {
-		con_line("", owner ? "off, not ours: needs an RPMh vote" : "off, voltage not set: not touching it");
+		con_line("", owner ? "off, not ours: asking the AOP (RPMh)" : "off, voltage not set: not touching it");
+		if (owner)
+			touch_avdd_rpmh();
 		return;
 	}
 	int ok = spmi_write(apid, 0x46, 0x80);
