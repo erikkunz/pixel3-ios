@@ -381,6 +381,10 @@ The touchscreen is an ST FTM5 (chip id `36 39`) at I2C 0x49. Getting it to repor
 
 After that, touching and dragging produced live motion events (`23 01 ...`, x=508 y=1600). `0113-blueline-touch-bitbang.patch` puts the same sequence in the kernel, on by default (`bluetouch=0` turns it off). It reads the FIFO when the IRQ line (GPIO 125) is low, and every 100 ms regardless.
 
+### Touch in iOS (2026-10-22 23:07)
+
+`0113` + `0114` (cmd-db mapped at a fixed 128 KiB: the second word of the locator is not a size, and with the old check the RPMh vote never went out) on 4 cores (`cpus=4 wfi=0`, `shim-touch4b.img`): **touch works in iOS**. Swiping on the lock screen opened the Focus menu. Two layout issues: the canvas was cropped (the presented 1125x2436 cut to 1080x2160, which lost 138 rows top and bottom), and it is slow on the 4 Silver cores. `0115-blueline-display-fit.patch` scales the canvas to the panel's height instead (nearest neighbour, 997x2160 with 41-column black bars) and maps touch the same way. `bluefb_fit=0` brings back the crop. In the last few boots, 8 cores (`cpus=8`, real WFI) stalled at the "SWEET SMP" lines 3 times out of 6.
+
 ### Other ports worth following
 
 - **ios-sailfish** (Pixel 1, Snapdragon 821; owner known to us): GPU
