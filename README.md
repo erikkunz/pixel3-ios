@@ -393,6 +393,12 @@ The panel copy rate goes from `sweetfb_hz=10` (chosen for 4 slow cores) to 30 on
 
 GPU, the next big step: HackiOS's staged Adreno 642L bring-up (`redwood_adreno.c`: GX/CX power, GMU firmware and HFI, zap shader through TrustZone, SQE microcode, a test picture) is the template for our Adreno 630 (same A6xx family, also with a GMU). On the user side: Mesa freedreno (a630 is well supported) behind an EAGL bridge in backboardd.
 
+### SMP stall found: stale table-walk entries (2026-10-23)
+
+The sampler caught the stalled process: `seputil` spinning inside dyld (`lsl::PersistentAllocator` constructor, called from `start`) on one store into memory it had just allocated. The fault is "handled" and the store faults again, forever. `0117-blueline-fault-loop.patch` reports a thread that faults on the same address 10,000 times in a row, then invalidates that VA in every TLB (`TLBI VAAE1IS`). In one boot (`work/log-flt8.txt`) it fired 11 times. Every time: ESR `0x92000047` (level-3 translation fault on a write), PAR `0x80f` (the hardware walk also faults, although the page is mapped), and the loop ended after the invalidate. So the cores were holding stale table-walk cache entries, and each of these would have been a boot stall. The invalidate works as a fix (0117 stays in). A proper one would invalidate non-leaf entries when XNU frees page tables. `0118-blueline-touch-edge.patch` flags touches that start at an edge with the edge-tip flag (as ios-sweet 0071), for the home and app-switcher gestures.
+
+**Booting without fastboot:** `shim-edge8.img` (8 cores, 30 Hz, everything above) is flashed to `boot_a` and slot A is active (the old `boot_a` is in `backup/boot/boot_a.img`). Slot B still has LineageOS with recovery: from fastboot, `fastboot --set-active=b` then `fastboot reboot recovery`. To return to iOS: `--set-active=a`.
+
 ### Other ports worth following
 
 - **ios-sailfish** (Pixel 1, Snapdragon 821; owner known to us): GPU
