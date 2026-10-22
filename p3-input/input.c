@@ -227,8 +227,255 @@ static int i2c_xfer(int read, const uint8_t *tx, uint8_t *rx, uint32_t len, int 
 	return rc;
 }
 
+/*
+ * ---- GPI DMA ----
+ * This SE has its FIFO interface disabled (GENI_IF_DISABLE_RO bit 0): the
+ * bytes move only through QUP wrapper 0's GPI engine, as Linux's gpi.c and
+ * i2c-qcom-geni.c (GPI mode) do it. One GPI interface ("GPII") of the apps
+ * processor's mask (DT qcom,gpii-mask = 0xfa) with its two channels (0 = TX,
+ * 1 = RX) and one event ring; each channel names the SE it serves in its
+ * scratch register. Polled: command completion from the channel state,
+ * transfer completion from the event ring. MMU and caches are off here, so
+ * the rings are at their physical addresses and need no cache maintenance.
+ */
+#define GPI		0x00800000UL
+#define GPI_SEID	2U			/* SE2 */
+#define GPI_PROTO_I2C	3U
+#define GPI_MASK	0xfaU			/* GPIIs the apps processor may use */
+#define GPII(n, o)	(GPI + 0x4000UL * (n) + (o))
+#define CH_CNTXT(n, k)	GPII(n, 0x20000UL + 0x80UL * (k))	/* +0 config/state, +4 length, +8/+c base, +10 RP */
+#define EV_CNTXT(n)	GPII(n, 0x21000UL)
+#define CH_DB(n, k)	GPII(n, 0x22000UL + 0x8UL * (k))
+#define EV_DB(n)	GPII(n, 0x22100UL)
+#define CH_CMD(n)	GPII(n, 0x23008UL)
+#define EV_CMD(n)	GPII(n, 0x23010UL)
+#define TRE_CHAIN	(1U << 0)
+#define TRE_IEOT	(1U << 9)
+#define TRE_LINK	(1U << 11)
+#define TRE_DMA		(0x10U << 16)
+#define TRE_GO		(0x20U << 16)
+#define TRE_CONFIG0	(0x22U << 16)
+#define CH_TRES		64U
+#define EV_ELEMS	256U
+
+static volatile uint32_t gpi_ch_ring[2][CH_TRES * 4] __attribute__((aligned(1024)));
+static volatile uint32_t gpi_ev_ring[EV_ELEMS * 4] __attribute__((aligned(4096)));
+static volatile uint8_t gpi_buf[2][64] __attribute__((aligned(64)));
+static uint32_t gpi_ch_wp[2], gpi_ev_rp, gpi_ev_wp, gpii, gpi_mode;
+static uint32_t gpi_ev[4];		/* the last event, for the screen */
+
+static uint32_t gpi_state(uintptr_t cntxt)
+{
+	return rd32(cntxt) >> 20 & 0xf;
+}
+
+static int gpi_wait_state(uintptr_t cntxt, uint32_t state)
+{
+	uint64_t end = now() + ticks_per_s() / 4;	/* Linux: 250 ms */
+	while (now() < end)
+		if (gpi_state(cntxt) == state)
+			return 0;
+	return -1;
+}
+
+static void gpi_clear_ctrl_irqs(uint32_t n)
+{
+	w32(GPII(n, 0x230a0), rd32(GPII(n, 0x23090)));	/* channel control */
+	w32(GPII(n, 0x230a4), rd32(GPII(n, 0x23094)));	/* event ring control */
+}
+
+/* Linux's gpi_ch_init(): interrupts configured, event ring allocated, both channels allocated and started. */
+static int gpi_init(uint32_t n)
+{
+	uintptr_t ev = (uintptr_t)gpi_ev_ring;
+
+	w32(GPII(n, 0x23088), 0x4fU);		/* TYPE_IRQ_MSK: general, IEOB, glob, ev ctrl, ch ctrl */
+	w32(GPII(n, 0x230b8), 1U);		/* IEOB */
+	w32(GPII(n, 0x23098), 3U);		/* channels */
+	w32(GPII(n, 0x2309c), 1U);		/* event ring */
+	w32(GPII(n, 0x23108), 0xfU);		/* GLOB_IRQ_EN */
+	w32(GPII(n, 0x23120), 0xfU);		/* GPII_IRQ_EN */
+	w32(GPII(n, 0x23188), 0);		/* MSI base */
+	w32(GPII(n, 0x2318c), 0);
+	w32(GPII(n, 0x23400), 0);		/* scratch */
+	w32(GPII(n, 0x23404), 0);
+	w32(GPII(n, 0x23180), 1U);		/* INTSET */
+	w32(GPII(n, 0x23200), 0);		/* error log */
+
+	w32(EV_CMD(n), 0);			/* ALLOCATE */
+	if (gpi_wait_state(EV_CNTXT(n), 1))
+		return -1;
+	w32(EV_CNTXT(n) + 0x00, (16U << 24) | (1U << 16) | 2U);	/* 16-byte elements, IRQ type, GPI event ring */
+	w32(EV_CNTXT(n) + 0x04, EV_ELEMS * 16);
+	w32(EV_CNTXT(n) + 0x08, (uint32_t)ev);
+	w32(EV_CNTXT(n) + 0x0c, (uint32_t)((uint64_t)ev >> 32));
+	w32(EV_DB(n) + 4, (uint32_t)((uint64_t)ev >> 32));
+	w32(EV_CNTXT(n) + 0x20, 0);		/* interrupt moderation */
+	w32(EV_CNTXT(n) + 0x28, 0);
+	w32(EV_CNTXT(n) + 0x2c, 0);
+	w32(EV_CNTXT(n) + 0x30, 0);
+	w32(EV_CNTXT(n) + 0x34, 0);
+	gpi_ev_rp = 0;
+	gpi_ev_wp = EV_ELEMS - 1;		/* the whole ring is the engine's to fill */
+	w32(EV_DB(n), (uint32_t)(ev + 16 * gpi_ev_wp));
+	gpi_clear_ctrl_irqs(n);
+
+	for (uint32_t k = 0; k < 2; k++) {
+		uintptr_t r = (uintptr_t)gpi_ch_ring[k];
+
+		w32(CH_CMD(n), k);		/* ALLOCATE */
+		if (gpi_wait_state(CH_CNTXT(n, k), 1))
+			return -2 - (int)k;
+		w32(CH_CNTXT(n, k) + 0x00, (16U << 24) | ((k == 0) << 3) | 2U);	/* TX is "out" */
+		w32(CH_CNTXT(n, k) + 0x04, CH_TRES * 16);
+		w32(CH_CNTXT(n, k) + 0x08, (uint32_t)r);
+		w32(CH_CNTXT(n, k) + 0x0c, (uint32_t)((uint64_t)r >> 32));
+		w32(CH_DB(n, k) + 4, (uint32_t)((uint64_t)r >> 32));
+		w32(GPII(n, 0x20060 + 0x80 * k), ((1U - k) << 16) | (GPI_PROTO_I2C << 4) | GPI_SEID);
+		w32(GPII(n, 0x20064 + 0x80 * k), 0);
+		w32(GPII(n, 0x20068 + 0x80 * k), 0);
+		w32(GPII(n, 0x2006c + 0x80 * k), 0);
+		w32(GPII(n, 0x2005c + 0x80 * k), 1U);	/* QOS */
+		gpi_ch_wp[k] = 0;
+		gpi_clear_ctrl_irqs(n);
+	}
+	for (uint32_t k = 0; k < 2; k++) {
+		w32(CH_CMD(n), (1U << 24) | k);	/* START */
+		if (gpi_wait_state(CH_CNTXT(n, k), 2))
+			return -4 - (int)k;
+		gpi_clear_ctrl_irqs(n);
+	}
+	return 0;
+}
+
+static void gpi_tre(uint32_t k, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
+{
+	volatile uint32_t *t = &gpi_ch_ring[k][4 * (gpi_ch_wp[k] % CH_TRES)];
+
+	t[0] = d0;
+	t[1] = d1;
+	t[2] = d2;
+	t[3] = d3;
+	gpi_ch_wp[k]++;
+}
+
+static void gpi_ring(uint32_t k)
+{
+	__asm__ volatile("dsb sy" ::: "memory");
+	w32(CH_DB(gpii, k), (uint32_t)((uintptr_t)gpi_ch_ring[k] + 16 * (gpi_ch_wp[k] % CH_TRES)));
+}
+
+/* Until a transfer-complete event of channel chid: 0, or <0 (code/notification/timeout). */
+static int gpi_wait_xfer(uint32_t chid)
+{
+	uintptr_t base = (uintptr_t)gpi_ev_ring;
+	uint64_t end = now() + ticks_per_s() / 50;	/* 20 ms */
+
+	while (now() < end) {
+		uint32_t hw = (rd32(EV_CNTXT(gpii) + 0x10) - (uint32_t)base) / 16;
+
+		while (gpi_ev_rp != hw % EV_ELEMS) {
+			volatile uint32_t *e = &gpi_ev_ring[4 * gpi_ev_rp];
+
+			for (int i = 0; i < 4; i++)
+				gpi_ev[i] = e[i];
+			gpi_ev_rp = (gpi_ev_rp + 1) % EV_ELEMS;
+			gpi_ev_wp = (gpi_ev_wp + 1) % EV_ELEMS;
+			w32(EV_DB(gpii), (uint32_t)(base + 16 * gpi_ev_wp));
+			w32(GPII(gpii, 0x230c0), 1U);	/* IEOB clear */
+			uint32_t type = gpi_ev[3] >> 16 & 0xff, ch = gpi_ev[3] >> 24, code = gpi_ev[2] >> 24;
+			if (type == 0x31)		/* QUP notification: an error on the bus (NACK ...) */
+				return -4;
+			if (type == 0x22 && ch == chid)
+				return (code == 1 || code == 2 || code == 4) ? 0 : -5;
+		}
+	}
+	return -2;
+}
+
+/* Write cmd (repeated start), then read len bytes: Linux's geni_i2c_gpi_xfer() for two messages. */
+static int gpi_fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
+{
+	uintptr_t tx = (uintptr_t)gpi_buf[0], rx = (uintptr_t)gpi_buf[1];
+	int rc;
+
+	for (uint32_t i = 0; i < clen; i++)
+		gpi_buf[0][i] = cmd[i];
+	for (uint32_t i = 0; i < len; i++)
+		gpi_buf[1][i] = 0;
+	/* 400 kHz from 19.2 MHz (t_low 12, t_high 5, t_cycle 24, div 2), TX/RX packing */
+	gpi_tre(0, 12U | (5U << 8) | (24U << 16) | (3U << 24), 0, 2U, TRE_CONFIG0 | TRE_CHAIN);
+	gpi_tre(0, I2C_WRITE | (FTS_ADDR << 8) | (1U << 26), 0, clen, TRE_GO | TRE_CHAIN);
+	gpi_tre(0, (uint32_t)tx, (uint32_t)((uint64_t)tx >> 32), clen, TRE_DMA | TRE_IEOT);
+	gpi_ring(0);
+	rc = gpi_wait_xfer(0);
+	if (rc)
+		return rc;
+	gpi_tre(1, (uint32_t)rx, (uint32_t)((uint64_t)rx >> 32), len, TRE_DMA | TRE_IEOT);
+	gpi_ring(1);
+	gpi_tre(0, I2C_READ | (FTS_ADDR << 8), 0, len, TRE_GO | TRE_LINK);
+	gpi_ring(0);
+	rc = gpi_wait_xfer(1);
+	for (uint32_t i = 0; i < len; i++)
+		out[i] = gpi_buf[1][i];
+	return rc ? rc - 10 : 0;
+}
+
+/* GENI side of GPI mode (geni_se_select_gpi_mode()), then a free GPII. */
+static int gpi_setup(char *buf)
+{
+	char *p;
+	int rc = -1;
+
+	w32(SE + SE_M_IRQ_CLR, 0xffffffffU);
+	w32(SE + 0x648, 0xffffffffU);		/* S_IRQ_CLEAR */
+	w32(SE + 0xc44, 0xffffffffU);		/* DMA TX/RX IRQ clear */
+	w32(SE + 0xd44, 0xffffffffU);
+	w32(SE + 0xe1c, 0);			/* SE_IRQ_EN */
+	w32(SE + 0x614, rd32(SE + 0x614) & ~(M_CMD_DONE | (1U << 26) | (1U << 27) | (1U << 30)));
+	w32(SE + SE_DMA_MODE, 1U);		/* GENI_DMA_MODE_EN */
+	w32(SE + 0xe18, rd32(SE + 0xe18) | 0xfU);	/* SE_GSI_EVENT_EN: DMA RX/TX, M, S */
+
+	/* States the firmware left (ch0 ch1 ev, 0 = free); the first free GPII of the mask is taken. */
+	p = fmt_str(buf, "gpii");
+	for (uint32_t n = 0; n < 8; n++) {
+		if (!(GPI_MASK >> n & 1))
+			continue;
+		p = fmt_str(p, " ");
+		p = fmt_dec(p, n);
+		p = fmt_str(p, ":");
+		p = fmt_hex(p, gpi_state(CH_CNTXT(n, 0)), 1);
+		p = fmt_hex(p, gpi_state(CH_CNTXT(n, 1)), 1);
+		p = fmt_hex(p, gpi_state(EV_CNTXT(n)), 1);
+	}
+	con_line("GPI", buf);
+	for (uint32_t n = 0; n < 8 && rc; n++) {
+		if (!(GPI_MASK >> n & 1) || gpi_state(CH_CNTXT(n, 0)) || gpi_state(CH_CNTXT(n, 1)) ||
+		    gpi_state(EV_CNTXT(n)))
+			continue;
+		gpii = n;
+		rc = gpi_init(n);
+		p = fmt_str(buf, "init gpii ");
+		p = fmt_dec(p, n);
+		p = fmt_str(p, rc ? " FAILED rc=-" : " ok, channels started");
+		if (rc)
+			p = fmt_dec(p, (uint64_t)(-rc));
+		p = fmt_str(p, " st=");
+		p = fmt_hex(p, gpi_state(CH_CNTXT(n, 0)), 1);
+		p = fmt_hex(p, gpi_state(CH_CNTXT(n, 1)), 1);
+		p = fmt_hex(p, gpi_state(EV_CNTXT(n)), 1);
+		p = fmt_str(p, " err=");
+		fmt_hex(p, rd32(GPII(n, 0x23200)), 8);
+		con_line("", buf);
+	}
+	gpi_mode = rc == 0;
+	return rc;
+}
+
 static int fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
 {
+	if (gpi_mode)
+		return gpi_fts_read(cmd, clen, out, len);
 	int rc = i2c_xfer(0, cmd, 0, clen, 1);
 	return rc ? rc : i2c_xfer(1, 0, out, len, 0);
 }
@@ -300,6 +547,8 @@ static void show_touch_bus(void)
 	p = fmt_hex(p, rd32(SE + 0x064), 8);
 	p = fmt_str(p, rd32(SE + 0x064) & 1 ? " FIFO OFF (DMA only)" : " fifo ok");
 	con_line("", buf);
+	if ((rd32(SE + 0x064) & 1) && gpi_setup(buf))
+		return;
 	p = fmt_str(buf, "geni st=");
 	p = fmt_hex(p, rd32(SE + 0x040), 8);
 	p = fmt_str(p, " scl rb=");
@@ -319,7 +568,14 @@ static void show_touch_bus(void)
 	if (rc) {
 		p = fmt_dec(p, (uint64_t)(-rc));
 		p = fmt_str(p, " status=");
-		fmt_hex(p, i2c_status, 8);
+		p = fmt_hex(p, i2c_status, 8);
+		if (gpi_mode) {
+			p = fmt_str(p, " ev=");
+			for (int i = 0; i < 4; i++) {
+				p = fmt_hex(p, gpi_ev[i], 8);
+				p = fmt_str(p, " ");
+			}
+		}
 	} else {
 		for (int i = 0; i < 4; i++) {
 			p = fmt_hex(p, id[i], 2);
