@@ -781,6 +781,65 @@ static int bb_setup(char *buf)
 	return found ? 0 : -1;
 }
 
+static int bb_fts_write(const uint8_t *data, uint32_t len)
+{
+	int rc = 0;
+
+	bb_start();
+	if (bb_write(FTS_ADDR << 1))
+		rc = -1;
+	for (uint32_t i = 0; i < len && !rc; i++)
+		if (bb_write(data[i]))
+			rc = -2;
+	bb_stop();
+	return rc;
+}
+
+/* Up to n events from the FIFO, each shown; returns how many were not empty. */
+static int fts_drain(const char *label, int n)
+{
+	static const uint8_t fifo_cmd[1] = { 0x86 };
+	char buf[96], *p;
+	int got = 0;
+
+	for (int i = 0; i < n; i++) {
+		uint8_t e[8] = { 0 };
+		if (bb_fts_read(fifo_cmd, 1, e, 8) || !e[0])
+			break;
+		got++;
+		p = fmt_str(buf, label);
+		for (int b = 0; b < 8; b++) {
+			p = fmt_hex(p, e[b], 2);
+			p = fmt_str(p, " ");
+		}
+		con_line("", buf);
+	}
+	return got;
+}
+
+/*
+ * FTM5 start-up (ST's fts_521 driver: fts_mode_handler(), fts_enableInterrupt()):
+ * the controller comes out of power-up with its config loaded ("controller
+ * ready" event 0x03) but does not scan until told to.
+ */
+static void fts_start(void)
+{
+	static const uint8_t sense_on[3] = { 0xa0, 0x00, 0xff };		/* scan mode: active, all */
+	static const uint8_t irq_on[6] = { 0xfa, 0x20, 0x00, 0x00, 0x2c, 0x41 };	/* IER = enable */
+	char buf[64], *p;
+
+	fts_drain("pending: ", 8);
+	int rc1 = bb_fts_write(irq_on, sizeof(irq_on));
+	int rc2 = bb_fts_write(sense_on, sizeof(sense_on));
+	p = fmt_str(buf, "irq on rc=");
+	p = fmt_dec(p, (uint64_t)(-rc1));
+	p = fmt_str(p, " sense on rc=");
+	fmt_dec(p, (uint64_t)(-rc2));
+	con_line("", buf);
+	spin_us(100000);
+	fts_drain("reply: ", 8);
+}
+
 static int fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
 {
 	if (bb_mode)
@@ -898,12 +957,14 @@ static void show_touch_bus(void)
 	con_line("FTS", buf);
 	if (rc)
 		return;
+	if (bb_mode)
+		fts_start();
 
 	/* Event FIFO for 20 s: tap the screen. */
 	con_line("", "tap the screen now (20 s)");
 	int row = con_row();
 	unsigned events = 0;
-	uint64_t end = now() + ticks_per_s() * LIVE_SECONDS / 3;
+	uint64_t end = now() + ticks_per_s() * LIVE_SECONDS * 2 / 3;
 	static const uint8_t fifo_cmd[1] = { 0x86 };
 	while (now() < end) {
 		uint8_t e[8] = { 0 };
@@ -914,6 +975,12 @@ static void show_touch_bus(void)
 			for (int i = 0; i < 8; i++) {
 				p = fmt_hex(p, e[i], 2);
 				p = fmt_str(p, " ");
+			}
+			if (e[0] >> 4 == 1 || e[0] >> 4 == 2) {	/* enter / motion: ios-raphael's decoding */
+				p = fmt_str(p, "x=");
+				p = fmt_dec(p, (uint64_t)(((e[3] & 0xf) << 8) | e[2]));
+				p = fmt_str(p, " y=");
+				fmt_dec(p, (uint64_t)((e[4] << 4) | (e[3] >> 4)));
 			}
 			con_at(0, row, buf, C_YELLOW, C_BLACK);
 		}
