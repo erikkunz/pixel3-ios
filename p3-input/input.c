@@ -264,6 +264,7 @@ static volatile uint8_t gpi_buf[2][64] __attribute__((aligned(64)));
 static uint32_t gpi_ch_wp[2], gpi_ev_rp, gpi_ev_wp, gpii, gpi_mode;
 static uint32_t gpi_ev[4];		/* the last event, for the screen */
 static uint32_t gpi_trace = 1;		/* progress lines for the first transfer */
+static void smmu_show_faults(const char *when);
 
 static uint32_t gpi_state(uintptr_t cntxt)
 {
