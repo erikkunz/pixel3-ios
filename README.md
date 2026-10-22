@@ -399,6 +399,10 @@ The sampler caught the stalled process: `seputil` spinning inside dyld (`lsl::Pe
 
 **Booting without fastboot:** `shim-edge8.img` (8 cores, 30 Hz, everything above) is flashed to `boot_a` and slot A is active (the old `boot_a` is in `backup/boot/boot_a.img`). Slot B still has LineageOS with recovery: from fastboot, `fastboot --set-active=b` then `fastboot reboot recovery`. To return to iOS: `--set-active=a`.
 
+### Bold Text hangs the respring (2026-10-23)
+
+Turning on Settings > Accessibility > Bold Text made SpringBoard respring and hang on the loader, and every later boot hung too. Fix from recovery: `tools/phone.sh sync`, then `tools/prefs-fix.sh com.apple.Accessibility EnhancedTextLegibilityEnabled false` (sets or removes one key in `/private/var/mobile/Library/Preferences`, then builds `work/diff.simg`), then flash the 0.4 MiB diff. Leave Bold Text off until there is a GPU. Recovery from slot B: `fastboot reboot recovery` is not supported by this bootloader. Use `--set-active=b`, then choose Recovery mode in the bootloader menu.
+
 ### Other ports worth following
 
 - **ios-sailfish** (Pixel 1, Snapdragon 821; owner known to us): GPU
