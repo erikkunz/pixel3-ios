@@ -403,6 +403,23 @@ The sampler caught the stalled process: `seputil` spinning inside dyld (`lsl::Pe
 
 Turning on Settings > Accessibility > Bold Text made SpringBoard respring and hang on the loader, and every later boot hung too. Fix from recovery: `tools/phone.sh sync`, then `tools/prefs-fix.sh com.apple.Accessibility EnhancedTextLegibilityEnabled false` (sets or removes one key in `/private/var/mobile/Library/Preferences`, then builds `work/diff.simg`), then flash the 0.4 MiB diff. Leave Bold Text off until there is a GPU. Recovery from slot B: `fastboot reboot recovery` is not supported by this bootloader. Use `--set-active=b`, then choose Recovery mode in the bootloader menu.
 
+### ios-flame (Pixel 4): the closest port, and the roadmap from here (2026-10-23)
+
+[ios-flame](https://github.com/NWylynko/ios-flame) (MIT, dipa-studio) has the same base as ours: ios-sweet's XNU 8796 patches and the iPhone X 16.7.16 userland, Google ABL with `fastboot boot`, and the root on `userdata`. Its SM8150 / Adreno 640 is the same A6xx family as our Adreno 630, and its Wi-Fi is a **WCN3990, our chip**. Worth taking, in this order:
+1. **USB Ethernet** (0088-0091): the live kernel log, a UDP command server and a TCP file server. Their USB DMA goes "through the apps SMMU the way ABL does it (own context bank, translation off)". That is the likely cause of our DWC3 SETEPCONFIG timeout.
+2. **RTC** (0099, PM8150; ours is PM8998, the same SPMI RTC type).
+3. Generic fixes:
+   - 0084: the early framebuffer mapped Device-GRE
+   - 0098: panic logs into the ring
+   - 0100: the clonefile fallback (our `hfs_clonefile` errors)
+   - 0103, 0114: AMFI answers
+   - 0104: planar IOSurfaces (blank Safari pages)
+   - 0121: the vsync period for CoreAnimation
+4. **Wi-Fi** (0123/0124 plus `wland` in userland).
+5. **GPU / Metal** (0095-0122: the A640 core, present, Turnip + metal2vulkan).
+
+From ios-sailfish: `0121-blueline-touch-irq.patch` takes their GIC SPI support (0181), puts touch on the TLMM summary interrupt (INTID 240, GPIO 125 level low), and coalesces moves to 60/s (0182). `bluetouchirq=0` brings back polling. Also on the way: data migration again (`tools/remigrate.sh`: the removable system apps and the wallpapers/posters it sets up), `mobileassetd` back, and `0119`/`0120` a static battery named AppleSmartBattery (as ios-raphael 0101).
+
 ### Other ports worth following
 
 - **ios-sailfish** (Pixel 1, Snapdragon 821; owner known to us): GPU
