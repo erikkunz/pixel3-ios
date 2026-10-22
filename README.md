@@ -435,6 +435,13 @@ daemons, routined, syncdefaultsd, homed, keybagd, watchdogd, ...). No job label 
 list. `shim-idle8.img` booted on it at 21:58. The run before it (idle8 on the old root)
 had 8 cores with real WFI, all handling timers and IPIs.
 
+**Lock screen (2026-10-22 22:01).** The second boot of `shim-idle8.img` on this root reached the iOS
+lock screen: 8 cores with real WFI, no migration bar. Together, these got it there:
+0111 (keychain wrap), 0112 (no set/way flush on idle) and HackiOS's migration-done
+records and job deny list. The first boot of the same image stopped on an "SMP timing"
+error (log overwritten, not yet diagnosed), so 8 cores are not fully reliable yet.
+Next: touch (GPI DMA), so the lock screen can be swiped away.
+
 ### Migration stuck at the end of the bar: keychain (2026-10-22)
 
 Overnight 4-core run with 0107: the bar stopped at the same point (the last
