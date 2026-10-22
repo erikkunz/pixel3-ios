@@ -407,6 +407,14 @@ client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
   (A55s run only when the big cores are busy), the memorystatus thresholds
   fix, and their keystore.
 
+### 8 cores + keychain fix (2026-10-22)
+
+`shim-aks8.img` (`cpus=8 wfi=0`, 0111): all 8 cores ran the whole session (cores 5-7
+about 1 M IPIs each), securityd's `aks_wrap_key` now returns 0. The run was stopped at
+68,000 frames, before the ~193,000 where the bar used to stall, so the migration
+question is still open; bluetoothd (106) and fairplayd (70) restarted all along. Next:
+`shim-idle8.img` (0112, `cpus=8` with real WFI), booted 21:24.
+
 ### HackiOS userland changes (prepared, not flashed)
 
 `tools/iosroot-tweaks.py` now does what HackiOS's userland does. It marks the
