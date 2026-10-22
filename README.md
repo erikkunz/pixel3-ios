@@ -114,4 +114,10 @@ This builds directly on other people's work:
 - Linux (`gcc-sdm845.c`, `gpi.c`, `i2c-qcom-geni.c`, `cmd-db.c`, `rpmh-rsc.c`, `arm-smmu-qcom.c`) and
   Google's Pixel 3 FTM5 driver, used as hardware references.
 
+## License
+
+[MIT](LICENSE) for the code in this repository. The kernel patches in `xnu/patches/` modify Apple's XNU, which
+is under the Apple Public Source License 2.0; code taken from other ports keeps its credit and license (see
+above).
+
 Apple, iOS and iPhone are trademarks of Apple Inc.
