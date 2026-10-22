@@ -1,0 +1,78 @@
+From 462b2d500bc27bf2cea71654a8a37ffb5bb91088 Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Thu, 22 Oct 2026 23:55:11 +0200
+Subject: [PATCH] 0117: report and break user fault loops (stale TLB test)
+
+---
+ osfmk/arm64/sleh.c | 48 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..0e1394e 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1353,6 +1353,51 @@ handle_sw_step_debug(arm_saved_state_t *state)
+ 	__builtin_unreachable();
+ }
+ 
++#if defined(SWEET)
++/*
++ * Pixel 3, 8 cores: early boot sometimes stops with one process re-executing
++ * a single store into memory it has just allocated (dyld's first allocation
++ * in seputil / init_featureflags): the fault is "handled" and taken again,
++ * for ever. Per CPU, the same thread faulting on the same address 10,000
++ * times in a row is reported once, with what the hardware walk sees now
++ * (AT S1E0W -> PAR_EL1), and that address is then invalidated in every TLB
++ * (TLBI VAAE1IS). If the loop stops there, the cause was a stale TLB entry.
++ */
++static vm_offset_t sweet_flt_far[MAX_CPUS];
++static uint64_t sweet_flt_tid[MAX_CPUS];
++static uint32_t sweet_flt_rep[MAX_CPUS];
++
++static void
++sweet_fault_loop_check(thread_t thread, uint32_t esr, vm_offset_t fault_addr, fault_status_t fault_code, kern_return_t result)
++{
++	int c = cpu_number();
++	uint64_t tid = thread_tid(thread);
++
++	if (c < 0 || c >= MAX_CPUS) {
++		return;
++	}
++	if (sweet_flt_far[c] != fault_addr || sweet_flt_tid[c] != tid) {
++		sweet_flt_far[c] = fault_addr;
++		sweet_flt_tid[c] = tid;
++		sweet_flt_rep[c] = 0;
++		return;
++	}
++	uint32_t n = ++sweet_flt_rep[c];
++	if (n != 10000 && n != 20000 && (n % 1000000) != 0) {
++		return;
++	}
++	uint64_t par;
++	__asm__ volatile ("at s1e0w, %0" : : "r"(fault_addr));
++	__builtin_arm_isb(ISB_SY);
++	par = __builtin_arm_rsr64("PAR_EL1");
++	printf("SWEET FAULT LOOP: cpu%d tid %llu far %#lx esr %#x fsc %#x result %d repeat %u par %#llx ttbr0 %#llx\n",
++	    c, tid, (unsigned long)fault_addr, esr, (unsigned)fault_code, result, n, par,
++	    __builtin_arm_rsr64("TTBR0_EL1"));
++	uint64_t va = (fault_addr >> 12) & ((1ULL << 44) - 1);
++	__asm__ volatile ("dsb ishst\n tlbi vaae1is, %0\n dsb ish\n isb" : : "r"(va) : "memory");
++}
++#endif
++
+ static void
+ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr,
+     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
+@@ -1405,6 +1450,9 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
+ 		if (thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+ 			thread_reset_pcs_done_faulting(thread);
+ 		}
++#if defined(SWEET)
++		sweet_fault_loop_check(thread, esr, fault_addr, fault_code, result);
++#endif
+ 		if (result == KERN_SUCCESS || result == KERN_ABORTED) {
+ 			return;
+ 		}
+-- 
+2.54.0 (Apple Git-157)
+
