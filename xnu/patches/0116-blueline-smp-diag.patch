@@ -1,0 +1,105 @@
+From cc22d3c1b4d2bbcb85bcb9b8f08e4c09818e0d4d Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Thu, 22 Oct 2026 23:19:30 +0200
+Subject: [PATCH] 0116: SMP stats: IPIs sent, cpu_signal, scheduler state, GICR
+ SGI pending/enable/WAKER per CPU
+
+---
+ iokit/Kernel/arm/SweetCPU.cpp |  2 ++
+ osfmk/arm64/cpu.c             | 45 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 7697681..3c82e50 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -21,6 +21,7 @@
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ extern "C" void sweet_smp_stats_print(void);	/* osfmk/arm64/cpu.c */
++extern "C" uint64_t sweet_ipi_sent[];		/* osfmk/arm64/cpu.c, per target CPU */
+ 
+ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+@@ -232,6 +233,7 @@ SweetCPU::signalCPU(IOCPU *target)
+ 	    (((mpidr >> 16) & 0xff) << 32) |
+ 	    (((mpidr >> 8) & 0xff) << 16) |
+ 	    ((uint64_t)SWEET_IPI_SGI << 24) | (1ULL << aff0);
++	__atomic_fetch_add(&sweet_ipi_sent[logical], 1, __ATOMIC_RELAXED);
+ 	__builtin_arm_dsb(DSB_ISHST);
+ 	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
+ 	__builtin_arm_isb(ISB_SY);
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index dc95e78..d2acba3 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -37,6 +37,7 @@
+ #include <kern/cpu_number.h>
+ #include <kern/percpu.h>
+ #include <kern/thread.h>
++#include <kern/processor.h>
+ #include <kern/timer_queue.h>
+ #include <arm/cpu_data.h>
+ #include <arm/cpuid.h>
+@@ -986,14 +987,58 @@ sweet_cpu_signal_is_enabled(unsigned int cpu)
+  * Pixel 3 SMP diagnostics: per CPU, the timer interrupts and IPIs taken so
+  * far and how far away its next timer deadline (rtcPop) is. Printed
+  * periodically by SweetCPU (boot-arg sweetsmpstats=N seconds, 0 = off).
++ *
++ * Second line per CPU (0116), to tell where an IPI to a Gold core is lost:
++ * IPIs sent to it (SweetCPU::signalCPU), its cpu_signal flags (SIGPdisabled
++ * = 0x80000000 makes cpu_signal() drop every IPI to it), the scheduler's
++ * view (processor state, priority, thread), and its GICv3 redistributor:
++ * SGI pending/enabled bits and WAKER (ProcessorSleep/ChildrenAsleep).
+  */
++uint64_t sweet_ipi_sent[MAX_CPUS];
++static vm_offset_t sweet_gicr;
++#define SWEET_GICR_PA		0x17a60000u
++#define SWEET_GICR_FRAMES	8u
++
++static vm_offset_t
++sweet_gicr_frame(uint32_t phys_id)
++{
++	if (!sweet_gicr) {
++		sweet_gicr = ml_io_map(SWEET_GICR_PA, SWEET_GICR_FRAMES * GICR_PE_SIZE);
++	}
++	for (uint32_t f = 0; sweet_gicr && f < SWEET_GICR_FRAMES; f++) {
++		vm_offset_t b = sweet_gicr + f * GICR_PE_SIZE;
++		uint64_t typer = *(volatile uint64_t *)(b + GICR_TYPER);
++		if (((typer >> GICR_TYPER_AFFINITY_VALUE_SHIFT) & 0xffff) == (phys_id & 0xffff)) {
++			return b;
++		}
++	}
++	return 0;
++}
++
+ void sweet_smp_stats_print(void);
+ void
+ sweet_smp_stats_print(void)
+ {
++	const ml_topology_info_t *topology = ml_get_topology_info();
+ 	uint64_t now = mach_absolute_time(), ns;
+ 	absolutetime_to_nanoseconds(now, &ns);
+ 	printf("SWEET SMP: t=%llu ms on cpu%d\n", ns / NSEC_PER_MSEC, cpu_number());
++	for (unsigned int i = 0; i < MAX_CPUS && i < topology->num_cpus; i++) {
++		cpu_data_t *cdp = CpuDataEntries[i].cpu_data_vaddr;
++		processor_t p = processor_array[i];
++		vm_offset_t r = sweet_gicr_frame(topology->cpus[i].phys_id);
++		if (cdp == NULL) {
++			continue;
++		}
++		thread_t t = p ? p->active_thread : THREAD_NULL;
++		printf("SWEET SMP: cpu%u sent %llu sig %#x state %d pri %d tid %llu gicr pend %#x en %#x waker %#x\n", i,
++		    os_atomic_load(&sweet_ipi_sent[i], relaxed), os_atomic_load(&cdp->cpu_signal, relaxed),
++		    p ? (int)p->state : -1, p ? (int)p->current_pri : -1,
++		    t ? (unsigned long long)thread_tid(t) : 0ULL,
++		    r ? *(volatile uint32_t *)(r + 0x10200) : 0xdeadu,		/* GICR_ISPENDR0 */
++		    r ? *(volatile uint32_t *)(r + GICR_ISENABLER0) : 0xdeadu,
++		    r ? *(volatile uint32_t *)(r + GICR_WAKER) : 0xdeadu);
++	}
+ 	for (unsigned int i = 0; i < MAX_CPUS; i++) {
+ 		cpu_data_t *cdp = CpuDataEntries[i].cpu_data_vaddr;
+ 		if (cdp == NULL) {
+-- 
+2.54.0 (Apple Git-157)
+
