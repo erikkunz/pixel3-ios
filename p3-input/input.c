@@ -265,6 +265,7 @@ static uint32_t gpi_ch_wp[2], gpi_ev_rp, gpi_ev_wp, gpii, gpi_mode;
 static uint32_t gpi_ev[4];		/* the last event, for the screen */
 static uint32_t gpi_trace = 1;		/* progress lines for the first transfer */
 static void smmu_show_faults(const char *when);
+static void smmu_line(const char *a, uint64_t x, const char *b, uint64_t y);
 
 static uint32_t gpi_state(uintptr_t cntxt)
 {
@@ -455,17 +456,34 @@ static void smmu_show_faults(const char *when)
 	p = fmt_str(buf, when);
 	p = fmt_str(p, " gfsr=");
 	p = fmt_hex(p, rd32(SMMU + 0x48), 8);
-	p = fmt_str(p, " syn0=");
-	p = fmt_hex(p, rd32(SMMU + 0x50), 8);
 	p = fmt_str(p, " syn1=");
-	p = fmt_hex(p, rd32(SMMU + 0x54), 8);
-	if (smmu_cb) {
-		p = fmt_str(p, " cbfsr=");
-		p = fmt_hex(p, rd32(smmu_cb + 0x58), 8);
-		p = fmt_str(p, " far=");
-		fmt_hex(p, rd32(smmu_cb + 0x60), 8);
-	}
+	fmt_hex(p, rd32(SMMU + 0x54), 8);
 	con_line("", buf);
+	if (smmu_cb)
+		smmu_line("  cbfsr=", rd32(smmu_cb + 0x58), " far=", rd32(smmu_cb + 0x60));
+}
+
+static void smmu_line(const char *a, uint64_t x, const char *b, uint64_t y)
+{
+	char buf[64], *p;
+
+	p = fmt_str(buf, a);
+	p = fmt_hex(p, x, 8);
+	p = fmt_str(p, b);
+	fmt_hex(p, y, 8);
+	con_line("", buf);
+}
+
+/* TLBIALLNSNH, TLBIALLH, then a global sync (sTLBGSYNC/sTLBGSTATUS): Linux's arm_smmu_device_reset(). */
+static void smmu_tlb_sync(void)
+{
+	uint64_t end = now() + ticks_per_s() / 100;
+
+	w32(SMMU + 0x68, 0);
+	w32(SMMU + 0x6c, 0);
+	w32(SMMU + 0x70, 0);
+	while ((rd32(SMMU + 0x74) & 1) && now() < end)
+		;
 }
 
 static int smmu_bypass_gpi(char *buf)
@@ -473,11 +491,21 @@ static int smmu_bypass_gpi(char *buf)
 	uint32_t idr0 = rd32(SMMU + 0x20), idr1 = rd32(SMMU + 0x24);
 	uint32_t nsmr = idr0 & 0xff, ncb = idr1 & 0xff, pgshift = (idr1 >> 31) ? 16 : 12;
 	uint32_t numpage = 1U << ((idr1 >> 28 & 7) + 1);
-	int match = -1, free_smr = -1, valid = 0;
+	int match = -1, free_smr = -1;
 	char *p;
 
 	if (nsmr > 128)
 		nsmr = 128;
+	p = fmt_str(buf, "scr0=");
+	p = fmt_hex(p, rd32(SMMU), 8);
+	p = fmt_str(p, " smrs ");
+	p = fmt_dec(p, nsmr);
+	p = fmt_str(p, " cbs ");
+	p = fmt_dec(p, ncb);
+	p = fmt_str(p, " pg ");
+	fmt_dec(p, pgshift);
+	con_line("SMMU", buf);
+	/* What the firmware set up: each valid stream match and how it is routed. */
 	for (uint32_t i = 0; i < nsmr; i++) {
 		uint32_t smr = rd32(SMMU + 0x800 + 4 * i);
 		if (!(smr >> 31)) {
@@ -485,48 +513,36 @@ static int smmu_bypass_gpi(char *buf)
 				free_smr = (int)i;
 			continue;
 		}
-		valid++;
+		smmu_line("smr=", smr, " s2cr=", rd32(SMMU + 0xc00 + 4 * i));
 		uint32_t mask = smr >> 16 & 0x7fff, id = smr & 0xffff;
 		if (((id ^ GPI_SID) & ~mask) == 0 && match < 0)
 			match = (int)i;
 	}
-	p = fmt_str(buf, "scr0=");
-	p = fmt_hex(p, rd32(SMMU), 8);
-	p = fmt_str(p, " smr ");
-	p = fmt_dec(p, (uint64_t)valid);
-	p = fmt_str(p, "/");
-	p = fmt_dec(p, nsmr);
-	p = fmt_str(p, " cb ");
-	p = fmt_dec(p, ncb);
-	p = fmt_str(p, " sid16: ");
 	if (match >= 0) {
-		p = fmt_str(p, "smr ");
-		p = fmt_dec(p, (uint64_t)match);
-		p = fmt_str(p, " s2cr=");
-		fmt_hex(p, rd32(SMMU + 0xc00 + 4 * (uint32_t)match), 8);
-		con_line("SMMU", buf);
-		return 0;		/* already routed by the firmware: leave it */
+		con_line("", "sid 0x16 already routed by the firmware");
+		return 0;
 	}
-	p = fmt_str(p, "none");
-	con_line("SMMU", buf);
-	delay_s(3);				/* each risky step stays on screen */
 	if (free_smr < 0 || ncb == 0)
 		return -1;
-	uint32_t cb = ncb - 1;
-	smmu_cb = SMMU + ((uintptr_t)(numpage + cb) << pgshift);
-	w32(SMMU + ((uintptr_t)(numpage + cb) << pgshift), 0);		/* CB SCTLR: translation off */
-	w32(SMMU + (1UL << pgshift) + 4 * cb, 1U << 16);		/* GR1 CBAR: S1 (bypassed), S2 bypass */
-	w32(SMMU + 0xc00 + 4 * (uint32_t)free_smr, cb);			/* S2CR: translate via cb */
-	w32(SMMU + 0x800 + 4 * (uint32_t)free_smr, (1U << 31) | GPI_SID);	/* SMR: valid, exact match */
-	p = fmt_str(buf, "sid16 -> smr ");
-	p = fmt_dec(p, (uint64_t)free_smr);
-	p = fmt_str(p, " cb ");
-	p = fmt_dec(p, cb);
-	p = fmt_str(p, " readback smr=");
-	p = fmt_hex(p, rd32(SMMU + 0x800 + 4 * (uint32_t)free_smr), 8);
-	p = fmt_str(p, " s2cr=");
-	fmt_hex(p, rd32(SMMU + 0xc00 + 4 * (uint32_t)free_smr), 8);
-	con_line("", buf);
+	uint32_t i = (uint32_t)free_smr, cb = ncb - 1;
+
+	/* Linux's quirk test, on our own (still invalid) entry: does BYPASS stick? */
+	w32(SMMU + 0xc00 + 4 * i, (1U << 16) | 0xffU);
+	uint32_t s2cr = rd32(SMMU + 0xc00 + 4 * i);
+	int bypass = (s2cr >> 16 & 3) == 1;
+	smmu_line("bypass test s2cr=", s2cr, bypass ? " ok, using it" : " no: cb", bypass ? 0 : cb);
+	if (!bypass) {
+		smmu_cb = SMMU + ((uintptr_t)(numpage + cb) << pgshift);
+		w32(smmu_cb + 0x00, 0);				/* SCTLR: translation off */
+		w32(smmu_cb + 0x58, 0xffffffffU);		/* FSR: clear */
+		w32(SMMU + (1UL << pgshift) + 4 * cb, 1U << 16);	/* CBAR: S1 (off), S2 bypass */
+		smmu_line("cb sctlr=", rd32(smmu_cb), " cbar=", rd32(SMMU + (1UL << pgshift) + 4 * cb));
+		w32(SMMU + 0xc00 + 4 * i, cb);			/* S2CR: translate via cb */
+	}
+	w32(SMMU + 0x800 + 4 * i, (1U << 31) | GPI_SID);	/* SMR: valid, exact match */
+	smmu_tlb_sync();
+	w32(SMMU + 0x48, rd32(SMMU + 0x48));		/* sGFSR: clear */
+	smmu_line("ours smr=", rd32(SMMU + 0x800 + 4 * i), " s2cr=", rd32(SMMU + 0xc00 + 4 * i));
 	delay_s(3);
 	return 0;
 }
