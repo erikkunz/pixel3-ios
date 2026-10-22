@@ -1,0 +1,28 @@
+From 914bf47abf81f8ed236a4a952d28305705168ade Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Thu, 22 Oct 2026 23:02:59 +0200
+Subject: [PATCH] 0114: blueline touch: cmd-db size fixed at 128 KiB
+
+---
+ bsd/dev/blueline_touch.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/dev/blueline_touch.c b/bsd/dev/blueline_touch.c
+index cdeb097..b9d59b0 100644
+--- a/bsd/dev/blueline_touch.c
++++ b/bsd/dev/blueline_touch.c
+@@ -203,8 +203,9 @@ cmddb_addr(const char *id)
+ 	if (!loc) {
+ 		return 0;
+ 	}
+-	uint32_t pa = rd(loc + (CMDDB_LOC_PA & 0xfffu)), size = rd(loc + (CMDDB_LOC_PA & 0xfffu) + 4);
+-	if (!pa || size < 0x1000 || size > 0x100000) {
++	/* the word after the address is not a usable size here: map SDM845's 128 KiB cmd-db region */
++	uint32_t pa = rd(loc + (CMDDB_LOC_PA & 0xfffu)), size = 0x20000;
++	if (!pa) {
+ 		return 0;
+ 	}
+ 	vm_offset_t db = ml_io_map(pa, size);
+-- 
+2.54.0 (Apple Git-157)
+
