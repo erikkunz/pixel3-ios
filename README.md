@@ -370,6 +370,17 @@ slowdown sweet also hit), 2x `hfs_clonefile: cluster_write failed - 34`.
 client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
 `sweetfb_hz=10` (0056's panel-copy throttle) to give the migration the CPU.
 
+### Touch works (probe, 2026-10-22)
+
+The touchscreen is an ST FTM5 (chip id `36 39`) at I2C 0x49. Getting it to report fingers took four findings:
+
+1. **GPI DMA crashes the SoC.** SE2's FIFO interface is disabled (`GENI_IF_DISABLE_RO` = 1), so Linux would use GPI DMA. GPI itself comes up: GPII 1 initializes and both channels start. The SMMU also accepts a stream entry for SID 0x16, whether routed through a bypass context bank (plain bypass is turned into "fault", as Linux expects on SDM845) or through the firmware's UFS context bank. Even so, the first descriptor fetch freezes the SoC within 1 ms and the firmware resets it seconds later. Likely cause: no interconnect vote for the QUP-to-DDR path. Parked.
+2. **Bit-banged I2C works.** Following HackiOS, which drives its panel's SPI by hand, the probe uses GPIO 27/28 as open-drain GPIOs at about 100 kHz. The chip ACKs only when `st,switch_gpio` (GPIO 136) is high, which routes the bus to the apps processor instead of the sensor hub.
+3. **Start-up as Google's driver does it** (`stm/fts.c`): system reset (`FA 20 00 00 24 80`), then "controller ready", interrupt enable at 0x20000029 (`... 29 41`), then `A0 00 FF` (scan mode active). I first wrote the interrupt enable to 0x2C by mistake.
+4. **avdd was off.** `avdd-supply` is PM8998 LDO19 (3.3 V). It is owned by the AOP (SPMI owner 4), so a direct PMIC write is not possible, and it is off after ABL. The chip answered and scanned, but never saw a finger. The probe asks the AOP for it over RPMh, as Linux's regulator driver does: `ldoa19` from cmd-db (0x41a00, cmd-db at 0x85fe0000), then 3300 mV, HPM and enable in active TCS 0 of the apps RSC (DRV 2, 0x179e0d00). All three commands completed.
+
+After that, touching and dragging produced live motion events (`23 01 ...`, x=508 y=1600). `0113-blueline-touch-bitbang.patch` puts the same sequence in the kernel, on by default (`bluetouch=0` turns it off). It reads the FIFO when the IRQ line (GPIO 125) is low, and every 100 ms regardless.
+
 ### Other ports worth following
 
 - **ios-sailfish** (Pixel 1, Snapdragon 821; owner known to us): GPU
