@@ -132,6 +132,65 @@ static void show_touch(uintptr_t dtb)
 	}
 }
 
+/* The regulators behind the touch node's vdd/avdd-supply: two walks (find the node by phandle, then its properties). */
+static struct {
+	uint32_t want;
+	const char *node;
+	const char *rname, *res;
+	uint32_t uv_min, uv_max;
+} sup;
+
+static void sup_find_cb(const struct fdt_prop *p, void *ctx)
+{
+	(void)ctx;
+	if (fdt_streq(p->name, "phandle") && p->len == 4 && fdt_be32(p->val) == sup.want)
+		sup.node = p->node;
+}
+
+static void sup_props_cb(const struct fdt_prop *p, void *ctx)
+{
+	(void)ctx;
+	if (p->node != sup.node)
+		return;
+	if (fdt_streq(p->name, "regulator-name"))
+		sup.rname = (const char *)p->val;
+	else if (fdt_streq(p->name, "qcom,resource-name"))
+		sup.res = (const char *)p->val;
+	else if (fdt_streq(p->name, "regulator-min-microvolt") && p->len == 4)
+		sup.uv_min = fdt_be32(p->val);
+	else if (fdt_streq(p->name, "regulator-max-microvolt") && p->len == 4)
+		sup.uv_max = fdt_be32(p->val);
+}
+
+static void show_supplies(uintptr_t dtb)
+{
+	char buf[96], *p;
+
+	for (int i = 0; i < ts.nprops; i++) {
+		if (!contains(ts.pname[i], 32, "supply") || ts.plen[i] != 4)
+			continue;
+		sup.want = fdt_be32(ts.pval[i]);
+		sup.node = 0;
+		sup.rname = sup.res = 0;
+		sup.uv_min = sup.uv_max = 0;
+		fdt_walk(dtb, sup_find_cb, 0);
+		if (sup.node)
+			fdt_walk(dtb, sup_props_cb, 0);
+		p = fmt_str(buf, ts.pname[i]);
+		p = fmt_str(p, ": ");
+		p = fmt_str(p, sup.node ? sup.node : "?");
+		p = fmt_str(p, " ");
+		p = fmt_str(p, sup.rname ? sup.rname : "");
+		p = fmt_str(p, " ");
+		p = fmt_str(p, sup.res ? sup.res : "");
+		p = fmt_str(p, " ");
+		p = fmt_dec(p, sup.uv_min);
+		p = fmt_str(p, "-");
+		fmt_dec(p, sup.uv_max);
+		con_line("", buf);
+	}
+}
+
 /* ---- touch bus: GENI I2C on QUP wrapper 0, SE2 (i2c@888000) ---- */
 
 /*
@@ -1164,6 +1223,7 @@ void entry_main(uintptr_t dtb, uintptr_t load)
 	con_at(0, 0, "PIXEL 3 INPUT p3   buttons + touch survey", C_GREEN, C_BLACK);
 	con_set_row(2);
 	show_touch(dtb);
+	show_supplies(dtb);
 	con_skip();
 #ifndef QEMU
 	show_touch_bus();
