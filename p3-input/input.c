@@ -324,6 +324,7 @@ static uint32_t gpi_ch_wp[2], gpi_ev_rp, gpi_ev_wp, gpii, gpi_mode;
 static uint32_t gpi_ev[4];		/* the last event, for the screen */
 static uint32_t gpi_trace = 1;		/* progress lines for the first transfer */
 static void smmu_show_faults(const char *when);
+static void touch_avdd(void);
 static void smmu_line(const char *a, uint64_t x, const char *b, uint64_t y);
 
 static uint32_t gpi_state(uintptr_t cntxt)
@@ -1031,8 +1032,10 @@ static void show_touch_bus(void)
 	con_line("FTS", buf);
 	if (rc)
 		return;
-	if (bb_mode)
+	if (bb_mode) {
+		touch_avdd();
 		fts_start();
+	}
 
 	/* Event FIFO for 20 s: tap the screen. */
 	con_line("", "tap the screen now (20 s)");
@@ -1117,9 +1120,8 @@ static int spmi_read(uint16_t apid, uint16_t addr, uint8_t *out)
 	return 0;
 }
 
-#ifdef VOLUP_PULLUP
 /*
- * The one PMIC write, only in the -DVOLUP_PULLUP build (input-volup.img):
+ * PMIC writes: in the -DVOLUP_PULLUP build (input-volup.img)
  * GPIO 6 DIG_PULL_CTL (0xc542) = 0, a 30 uA pull-up, as Linux configures it
  * for the volume-up key (pinctrl-spmi-gpio, bias-pull-up). EXT_WRITEL
  * (opcode 0) on this EE's read/write channel ("chnls", 0x10000 per APID),
@@ -1143,7 +1145,65 @@ static int spmi_write(uint16_t apid, uint16_t addr, uint8_t val)
 	}
 	return 0;
 }
-#endif
+
+/*
+ * The touch panel's analog supply (avdd-supply: PM8998 LDO19, 3.3 V; vdd is
+ * LDO14, 1.8 V). The chip answers and scans but never sees a finger, which
+ * is what a sensing front end without power looks like. Shown, and switched
+ * on directly if this EE owns the LDO and its voltage is already 3.0-3.4 V
+ * (written by the firmware); otherwise it needs an RPMh vote.
+ */
+#define L19_PPID	0x052U		/* SID 0, peripheral 0x52 (LDO1 = 0x40) */
+
+static void touch_avdd(void)
+{
+	char buf[96], *p;
+	uint8_t st = 0, lb = 0, ub = 0, mode = 0, en = 0;
+
+	arb_version = rd32(ARB_CORE);
+	arb_apids = rd32(ARB_CORE + 4) & 0x7ff;
+	uint16_t apid = find_apid(L19_PPID);
+	if (apid == NO_APID) {
+		con_line("AVDD", "LDO19: no APID");
+		return;
+	}
+	uint32_t owner = rd32(ARB_CNFG + 0x700 + 4UL * apid) & 7;
+	spmi_read(apid, 0x08, &st);
+	spmi_read(apid, 0x40, &lb);
+	spmi_read(apid, 0x41, &ub);
+	spmi_read(apid, 0x45, &mode);
+	spmi_read(apid, 0x46, &en);
+	uint32_t mv = (uint32_t)lb | ((uint32_t)ub << 8);
+	p = fmt_str(buf, "ldo19 apid=");
+	p = fmt_hex(p, apid, 3);
+	p = fmt_str(p, " owner=");
+	p = fmt_dec(p, owner);
+	p = fmt_str(p, " st=");
+	p = fmt_hex(p, st, 2);
+	p = fmt_str(p, " mv=");
+	p = fmt_dec(p, mv);
+	p = fmt_str(p, " mode=");
+	p = fmt_hex(p, mode, 2);
+	p = fmt_str(p, " en=");
+	fmt_hex(p, en, 2);
+	con_line("AVDD", buf);
+	if (en & 0x80)
+		return;
+	if (owner != 0 || mv < 3000 || mv > 3400) {
+		con_line("", owner ? "off, not ours: needs an RPMh vote" : "off, voltage not set: not touching it");
+		return;
+	}
+	int ok = spmi_write(apid, 0x46, 0x80);
+	spin_us(5000);
+	spmi_read(apid, 0x08, &st);
+	spmi_read(apid, 0x46, &en);
+	p = fmt_str(buf, ok ? "enabled: st=" : "write refused: st=");
+	p = fmt_hex(p, st, 2);
+	p = fmt_str(p, " en=");
+	fmt_hex(p, en, 2);
+	con_line("", buf);
+	spin_us(20000);			/* let the panel's analog side settle */
+}
 
 static void show_keys(void)
 {
