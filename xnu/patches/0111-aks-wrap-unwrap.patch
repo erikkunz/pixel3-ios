@@ -1,0 +1,70 @@
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index d11fe26..d681ac1 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -163,6 +163,54 @@ sweet_aks_device_state(IOExternalMethodArguments *args)
+ 	return sweet_aks_struct_out(args, buf, n);
+ }
+ 
++/*
++ * Key wrapping (selectors 10/11, aks_wrap_key / aks_unwrap_key): securityd
++ * wraps every keychain item key with a protection-class key; with "unsupported"
++ * no keychain item can be written (the first-boot data migration then waits
++ * forever). Without a SEP there is nothing to protect with, so wrapping is an
++ * 8-byte marker in front of the key (the size AES key wrap adds) and
++ * unwrapping checks and strips it: self-consistent, no secrecy.
++ */
++static const uint8_t sweet_aks_wrap_magic[8] = { 'P', 'X', '3', 'W', 'R', 'A', 'P', '1' };
++
++static uint32_t
++sweet_aks_struct_in(IOExternalMethodArguments *args, uint8_t *buf, uint32_t max)
++{
++	if (args->structureInputDescriptor != NULL) {
++		uint32_t n = (uint32_t)MIN((uint64_t)max, args->structureInputDescriptor->getLength());
++		return (uint32_t)args->structureInputDescriptor->readBytes(0, buf, n);
++	}
++	uint32_t n = MIN(max, args->structureInputSize);
++	if (args->structureInput != NULL) {
++		memcpy(buf, args->structureInput, n);
++	}
++	return n;
++}
++
++
++static IOReturn
++sweet_aks_wrap(IOExternalMethodArguments *args, bool wrap)
++{
++	uint8_t in[256], out[264];
++	uint32_t n = sweet_aks_struct_in(args, in, sizeof(in));
++	uint32_t m;
++	if (wrap) {
++		memcpy(out, sweet_aks_wrap_magic, 8);
++		memcpy(out + 8, in, n);
++		m = n + 8;
++	} else {
++		if (n < 8 || memcmp(in, sweet_aks_wrap_magic, 8) != 0) {
++			return kIOReturnError;	/* not ours: cannot be unwrapped */
++		}
++		memcpy(out, in + 8, n - 8);
++		m = n - 8;
++	}
++	for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++		args->scalarOutput[i] = 0;
++	}
++	return sweet_aks_struct_out(args, out, m);
++}
++
+ static uint32_t
+ sweet_aks_struct_out_size(IOExternalMethodArguments *args)
+ {
+@@ -222,6 +270,10 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		args->scalarOutput[0] = 0;
+ 		args->scalarOutputCount = 1;
+ 		break;
++	case kAKSWrapKey:
++	case kAKSUnwrapKey:
++		ret = sweet_aks_wrap(args, selector == kAKSWrapKey);
++		break;
+ 	case kAKSGetDeviceState:
+ 	case kAKSGetExtDeviceState:
+ 		args->scalarOutputCount = 0;

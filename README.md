@@ -390,6 +390,21 @@ client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
   empty `IOAcceleratorES` (`sweetaccel=0` off). Candidate for the
   `usermanagerd`/LaunchServices waits.
 
+### Migration stuck at the end of the bar: keychain (2026-10-22)
+
+Overnight 4-core run with 0107: the bar stopped at the same point (the last
+frame at ~193,000 swaps, then static all night). Behind it, routined,
+mobiletimerd, liveactivitiesd, fitnesscoachingd, remotepairingdeviced,
+calaccessd (~49 launches each), healthd and tccd (~25) kept restarting
+without crashing, and `securityd` called AppleKeyStore selector 10
+(`aks_wrap_key`) 20 times, which the keystore stand-in refused
+(`0xe00002c7`): no keychain item can be written. sweet never hit this
+because its migration had completed before the stand-in mattered.
+`0111-aks-wrap-unwrap.patch`: wrap = 8-byte marker + key (the size AES key
+wrap adds), unwrap checks and strips it (self-consistent, no secrecy, like
+the rest of the stand-in). Also: with `wfi=0` and no charger driver the
+battery ran flat overnight; let it charge in fastboot/recovery between runs.
+
 ### USB networking and live log (built, not yet run)
 
 ios-sweet's USB driver (0072-0077, 0081: DWC3 device mode, CDC-ECM network
