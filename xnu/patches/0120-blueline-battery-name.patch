@@ -1,0 +1,47 @@
+From d41725b3a12b7e69321fb201414ca65add544eab Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Fri, 23 Oct 2026 00:38:10 +0200
+Subject: [PATCH] 0120: battery registered as AppleSmartBattery
+
+---
+ iokit/Kernel/arm/BlueBattery.cpp | 4 +++-
+ iokit/KernelConfigTables.cpp     | 1 +
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/BlueBattery.cpp b/iokit/Kernel/arm/BlueBattery.cpp
+index 5f60673..a3a873d 100644
+--- a/iokit/Kernel/arm/BlueBattery.cpp
++++ b/iokit/Kernel/arm/BlueBattery.cpp
+@@ -76,6 +76,8 @@ BlueBattery::start(IOService *provider)
+ 	if (!IOPMPowerSource::start(provider)) {
+ 		return false;
+ 	}
++	/* The registry name iOS looks the battery up by (as ios-raphael 0101 found) */
++	setName("AppleSmartBattery");
+ 	setBatteryInstalled(true);
+ 	setCurrentCapacity(BLUE_BATTERY_MAH);
+ 	setMaxCapacity(BLUE_BATTERY_MAH);
+@@ -115,7 +117,7 @@ BlueBattery::start(IOService *provider)
+ 		legacy->release();
+ 	}
+ 	updateStatus();
+-	IOLog("BLUELINE BATTERY: static source, 100%% on external power\n");
++	IOLog("BLUELINE BATTERY: AppleSmartBattery, static, 100%% on external power\n");
+ 	registerService();
+ 	return true;
+ }
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 7d93f8f..219fadf 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -79,6 +79,7 @@ const char * gIOKernelConfigTables =
+     "   },"
+     "   {"
+     "     'IOClass'         = BlueBattery;"
++    "     'name'            = AppleSmartBattery;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = BlueBattery;"
+     "   },"
+-- 
+2.54.0 (Apple Git-157)
+
