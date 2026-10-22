@@ -407,6 +407,21 @@ client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
   (A55s run only when the big cores are busy), the memorystatus thresholds
   fix, and their keystore.
 
+### HackiOS userland changes (prepared, not flashed)
+
+`tools/iosroot-tweaks.py` now does what HackiOS's userland does. It marks the
+data migration done for 20H392 (`LastSystemVersion` plus
+`DMLastMigrationResults = {success, buildVersion}` in `com.apple.migration`;
+our earlier skip lacked the second key). It removes datamigrator's sentinel
+and drops the launchd jobs on their deny list (syncdefaultsd, routined,
+homed, duetexpertd, datamigrator, keybagd, ReportCrash, mobileassetd and
+others that crash or restart forever here). It also sets
+`FBLaunchWatchdogScale = 20`, `ForceNoBuddy` and battery percentage. To be
+tested: whether lsd builds LaunchServices from /Applications without the
+migration, as it does for them. Cycle: `tools/phone.sh sync
+work/ios-root.img` (recovery), `tools/tweak-diff.sh`, then flash
+`work/diff.simg` (with approval).
+
 ### Migration stuck at the end of the bar: keychain (2026-10-22)
 
 Overnight 4-core run with 0107: the bar stopped at the same point (the last

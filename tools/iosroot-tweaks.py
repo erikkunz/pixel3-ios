@@ -8,12 +8,16 @@ Idempotent; run as root (files keep their owners). What each change is for
 NOTES.md; the code here is our own):
 
   launchd.plist   no daemon may panic the system when it crashes
-                  (_PanicOnCrash renamed); CommCenter removed (no baseband)
+                  (_PanicOnCrash renamed); CommCenter removed (no baseband);
+                  jobs that crash and restart forever without the hardware
+                  or services they expect removed (DENY, HackiOS's list)
   containers      /private/var/containers/... exist (normally the data volume)
-  migration       left to run once on first boot (it seeds LaunchServices)
+  migration       recorded as done for this build, datamigrator not loaded
+                  (as HackiOS does; lsd builds its database from /Applications)
   audio/media     VirtualAudio HAL plug-in moved aside; MediaToolbox does not
                   start the recorder server (both crash without audio/GPU)
-  SpringBoard     no watchdogs (CPU rendering is slow), no cloud-config UI
+  SpringBoard     no watchdogs (CPU rendering is slow), launch watchdogs x20,
+                  no cloud-config UI, battery percentage shown
   Setup           marked done, mini-buddies off
   activation      mobileactivationd data ark says Activated (the kernel's
                   device tree selects its no-server "Hactivation" path)
@@ -26,6 +30,17 @@ import sys
 
 BUILD, VERSION = '20H392', '16.7.16'
 MOBILE = 501
+
+# Words in the labels of launchd jobs that are removed. HackiOS's list
+# (hackios-xnu-userland, userland/mkjobs.py): each of these is missing its
+# hardware or service here and crashes or is restarted over and over;
+# syncdefaultsd aborts part-way through the migration pass.
+DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'locationd', 'softwareupdate',
+        'datamigrator', 'backupd', 'thermalmonitord', 'keybagd', 'nfcd', 'biometrickitd', 'pearld',
+        'obliterat', 'storage_mounter', 'com.apple.fud', 'sepd', 'seputil', 'camera', 'ReportCrash',
+        'osanalytics', 'lockdown', 'audio', 'jetsamproperties', 'purplebuddy', 'restore', 'usb',
+        'accessoryd', 'mobileassetd', 'bird', 'homed', 'routined', 'duetexpertd', 'com.apple.dmd',
+        'syncdefaultsd', 'photoanalysisd', 'avconferenced')
 
 
 def read_plist(path):
@@ -65,10 +80,12 @@ def launchd_jobs(root):
             if '_PanicOnCrash' in job:
                 job['_PanicOnCrasX'] = job.pop('_PanicOnCrash')
                 n += 1
-        gone = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
+        gone = sorted(k for k, j in jobs.items() if any(w in j.get('Label', '') for w in DENY))
         for k in gone:
             del jobs[k]
-        print('launchd.plist: %d _PanicOnCrash renamed, %d CommCenter jobs removed' % (n, len(gone)))
+        print('launchd.plist: %d _PanicOnCrash renamed, %d jobs removed:' % (n, len(gone)))
+        for k in gone:
+            print('   ', k)
     rewrite(os.path.join(root, 'System/Library/xpc/launchd.plist'), change)
 
 
@@ -106,6 +123,17 @@ def activation(root):
     print('activation data ark written')
 
 
+def migration_done(root):
+    """Record the data migration as done for this build (undoes migration-reset.py)."""
+    preferences(root, 'com.apple.migration', {
+        'LastSystemVersion': BUILD,
+        'DMLastMigrationResults': {'success': True, 'buildVersion': BUILD}})
+    sentinel = os.path.join(root, 'private/var/datamigrator/migrate')
+    if os.path.exists(sentinel):
+        os.remove(sentinel)
+        print('datamigrator sentinel removed')
+
+
 def audio_media(root):
     plugin = os.path.join(root, 'Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin')
     if os.path.exists(plugin):
@@ -129,19 +157,20 @@ def main():
     containers(root)
     activation(root)
     audio_media(root)
-    # No migration skip: the first boot must run the data migration, which
-    # also seeds the LaunchServices database (lsd waits for it otherwise).
+    migration_done(root)
     preferences(root, 'com.apple.springboard', {
-        'BKNoWatchdogs': True,
+        'BKNoWatchdogs': True, 'FBLaunchWatchdogScale': 20, 'SBShowBatteryPercentage': True,
         'FBLaunchWatchdogExceptions': {'com.apple.purplebuddy': 100.0},
         'MCForceShowCloudConfigurationUI': False})
     preferences(root, 'com.apple.purplebuddy', {
         'SetupDone': True, 'SetupFinishedAllSteps': True, 'SetupVersion': 11,
+        'ForceNoBuddy': True, 'SetupState': 'SetupUsingAssistant',
         'daemonizeNeedsToRun': False})
     preferences(root, 'com.apple.purplebuddy.notbackedup', dict.fromkeys((
         'ShouldRunDiagnosticsMiniBuddy', 'ShouldRunHSA2MiniBuddy', 'ShouldRunKeychainSyncMiniBuddy',
         'ShouldRunMesaMiniBuddy', 'ShouldRunPaymentMiniBuddy', 'ShouldRunStandardMiniBuddy',
         'SilentICDPUpgrade'), False))
+    preferences(root, 'com.apple.frontboard', {'FBLaunchWatchdogScale': 20})
     preferences(root, 'com.apple.managedconfiguration.notbackedup', {
         'LockdownActivationIndicatesCloudConfigurationAvailable': False})
 
