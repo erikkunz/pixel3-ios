@@ -818,22 +818,37 @@ static int fts_drain(const char *label, int n)
 }
 
 /*
- * FTM5 start-up (ST's fts_521 driver: fts_mode_handler(), fts_enableInterrupt()):
- * the controller comes out of power-up with its config loaded ("controller
- * ready" event 0x03) but does not scan until told to.
+ * FTM5 start-up, as Google's Pixel 3 driver resumes it (stm/fts.c
+ * fts_resume_work(): system reset, wait for "controller ready", interrupts
+ * on, then fts_mode_handler()'s scan mode active with every scan the
+ * config supports). Registers from fts_lib/ftsHardware.h.
  */
 static void fts_start(void)
 {
-	static const uint8_t sense_on[3] = { 0xa0, 0x00, 0xff };		/* scan mode: active, all */
-	static const uint8_t irq_on[6] = { 0xfa, 0x20, 0x00, 0x00, 0x2c, 0x41 };	/* IER = enable */
+	static const uint8_t reset[6] = { 0xfa, 0x20, 0x00, 0x00, 0x24, 0x80 };	/* ADDR_SYSTEM_RESET */
+	static const uint8_t irq_on[6] = { 0xfa, 0x20, 0x00, 0x00, 0x29, 0x41 };	/* ADDR_IER = IER_ENABLE */
+	static const uint8_t sense_on[3] = { 0xa0, 0x00, 0xff };		/* SCAN_MODE_ACTIVE, all */
+	static const uint8_t fifo_cmd[1] = { 0x86 };
 	char buf[64], *p;
+	int ready = 0;
 
 	fts_drain("pending: ", 8);
+	int rc0 = bb_fts_write(reset, sizeof(reset));
+	uint64_t end = now() + ticks_per_s() / 2;
+	while (!ready && now() < end) {
+		uint8_t e[8] = { 0 };
+		spin_us(10000);
+		if (bb_fts_read(fifo_cmd, 1, e, 8) == 0 && e[0] == 0x03)
+			ready = 1;
+	}
 	int rc1 = bb_fts_write(irq_on, sizeof(irq_on));
 	int rc2 = bb_fts_write(sense_on, sizeof(sense_on));
-	p = fmt_str(buf, "irq on rc=");
+	p = fmt_str(buf, "reset rc=");
+	p = fmt_dec(p, (uint64_t)(-rc0));
+	p = fmt_str(p, ready ? " ready" : " NOT ready");
+	p = fmt_str(p, " irq rc=");
 	p = fmt_dec(p, (uint64_t)(-rc1));
-	p = fmt_str(p, " sense on rc=");
+	p = fmt_str(p, " sense rc=");
 	fmt_dec(p, (uint64_t)(-rc2));
 	con_line("", buf);
 	spin_us(100000);
