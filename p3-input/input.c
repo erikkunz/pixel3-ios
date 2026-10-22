@@ -491,7 +491,7 @@ static int smmu_bypass_gpi(char *buf)
 	uint32_t idr0 = rd32(SMMU + 0x20), idr1 = rd32(SMMU + 0x24);
 	uint32_t nsmr = idr0 & 0xff, ncb = idr1 & 0xff, pgshift = (idr1 >> 31) ? 16 : 12;
 	uint32_t numpage = 1U << ((idr1 >> 28 & 7) + 1);
-	int match = -1, free_smr = -1;
+	int match = -1, free_smr = -1, ufs_cb = -1;
 	char *p;
 
 	if (nsmr > 128)
@@ -517,6 +517,10 @@ static int smmu_bypass_gpi(char *buf)
 		uint32_t mask = smr >> 16 & 0x7fff, id = smr & 0xffff;
 		if (((id ^ GPI_SID) & ~mask) == 0 && match < 0)
 			match = (int)i;
+		/* UFS (stream 0x100): its DMA works under XNU, so its context bank is one we can share */
+		uint32_t s2 = rd32(SMMU + 0xc00 + 4 * i);
+		if (((id ^ 0x100U) & ~mask) == 0 && (s2 >> 16 & 3) == 0)
+			ufs_cb = (int)(s2 & 0xff);
 	}
 	if (match >= 0) {
 		con_line("", "sid 0x16 already routed by the firmware");
@@ -531,7 +535,13 @@ static int smmu_bypass_gpi(char *buf)
 	uint32_t s2cr = rd32(SMMU + 0xc00 + 4 * i);
 	int bypass = (s2cr >> 16 & 3) == 1;
 	smmu_line("bypass test s2cr=", s2cr, bypass ? " ok, using it" : " no: cb", bypass ? 0 : cb);
-	if (!bypass) {
+	if (!bypass && ufs_cb >= 0) {
+		/* The firmware's own context bank for UFS: its stage 2 is the hypervisor's, as for UFS. */
+		cb = (uint32_t)ufs_cb;
+		smmu_cb = SMMU + ((uintptr_t)(numpage + cb) << pgshift);
+		smmu_line("ufs cb sctlr=", rd32(smmu_cb), " cbar=", rd32(SMMU + (1UL << pgshift) + 4 * cb));
+		w32(SMMU + 0xc00 + 4 * i, cb);			/* S2CR: translate via the UFS bank */
+	} else if (!bypass) {
 		smmu_cb = SMMU + ((uintptr_t)(numpage + cb) << pgshift);
 		w32(smmu_cb + 0x00, 0);				/* SCTLR: translation off */
 		w32(smmu_cb + 0x58, 0xffffffffU);		/* FSR: clear */
