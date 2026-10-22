@@ -477,6 +477,7 @@ static int smmu_bypass_gpi(char *buf)
 	}
 	p = fmt_str(p, "none");
 	con_line("SMMU", buf);
+	delay_s(3);				/* each risky step stays on screen */
 	if (free_smr < 0 || ncb == 0)
 		return -1;
 	uint32_t cb = ncb - 1;
@@ -493,6 +494,7 @@ static int smmu_bypass_gpi(char *buf)
 	p = fmt_str(p, " s2cr=");
 	fmt_hex(p, rd32(SMMU + 0xc00 + 4 * (uint32_t)free_smr), 8);
 	con_line("", buf);
+	delay_s(3);
 	return 0;
 }
 
@@ -544,6 +546,7 @@ static int gpi_setup(char *buf)
 		p = fmt_str(p, " err=");
 		fmt_hex(p, rd32(GPII(n, 0x23200)), 8);
 		con_line("", buf);
+		delay_s(3);
 	}
 	gpi_mode = rc == 0;
 	return rc;
