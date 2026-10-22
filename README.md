@@ -383,7 +383,7 @@ After that, touching and dragging produced live motion events (`23 01 ...`, x=50
 
 ### Touch in iOS (2026-10-22 23:07)
 
-`0113` + `0114` (cmd-db mapped at a fixed 128 KiB: the second word of the locator is not a size, and with the old check the RPMh vote never went out) on 4 cores (`cpus=4 wfi=0`, `shim-touch4b.img`): **touch works in iOS**. Swiping on the lock screen opened the Focus menu. Two layout issues: the canvas was cropped (the presented 1125x2436 cut to 1080x2160, which lost 138 rows top and bottom), and it is slow on the 4 Silver cores. `0115-blueline-display-fit.patch` scales the canvas to the panel's height instead (nearest neighbour, 997x2160 with 41-column black bars) and maps touch the same way. `bluefb_fit=0` brings back the crop. In the last few boots, 8 cores (`cpus=8`, real WFI) stalled at the "SWEET SMP" lines 3 times out of 6.
+`0113` + `0114` (cmd-db mapped at a fixed 128 KiB: the second word of the locator is not a size, and with the old check the RPMh vote never went out) on 4 cores (`cpus=4 wfi=0`, `shim-touch4b.img`): **touch works in iOS**. Swiping on the lock screen opened the Focus menu. Two layout issues: the canvas was cropped (the presented 1125x2436 cut to 1080x2160, which lost 138 rows top and bottom), and it is slow on the 4 Silver cores. `0115-blueline-display-fit.patch` scales the canvas to the panel's height instead (nearest neighbour, 997x2160 with 41-column black bars) and maps touch the same way. `bluefb_fit=0` brings back the crop. Confirmed on the phone (8 cores, 23:18): the whole screen is visible and touch lines up. In the last few boots, 8 cores (`cpus=8`, real WFI) stalled at the "SWEET SMP" lines 3 times out of 6.
 
 ### Other ports worth following
 
