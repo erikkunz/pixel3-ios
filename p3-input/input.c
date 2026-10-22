@@ -408,9 +408,17 @@ static int gpi_fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_
 	gpi_tre(0, 12U | (5U << 8) | (24U << 16) | (3U << 24), 0, 2U, TRE_CONFIG0 | TRE_CHAIN);
 	gpi_tre(0, I2C_WRITE | (FTS_ADDR << 8) | (1U << 26), 0, clen, TRE_GO | TRE_CHAIN);
 	gpi_tre(0, (uint32_t)tx, (uint32_t)((uint64_t)tx >> 32), clen, TRE_DMA | TRE_IEOT);
-	if (gpi_trace)
+	if (gpi_trace) {
 		con_line("", "gpi: write TREs queued, ringing TX doorbell");
+		smmu_show_faults("before");
+	}
 	gpi_ring(0);
+	if (gpi_trace) {
+		spin_us(1000);
+		smmu_show_faults("1ms");
+		spin_us(100000);
+		smmu_show_faults("100ms");
+	}
 	rc = gpi_wait_xfer(0);
 	if (gpi_trace)
 		con_line("", rc ? "gpi: write failed" : "gpi: write done, reading");
@@ -435,6 +443,29 @@ static int gpi_fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_
  */
 #define SMMU		0x15000000UL
 #define GPI_SID		0x16U
+
+static uintptr_t smmu_cb;		/* the bypass context bank's registers, 0 if none */
+
+/* Global fault (sGFSR: bit 1 = unmatched stream; sGFSYNR1 = stream ID) and the bypass bank's FSR/FAR. */
+static void smmu_show_faults(const char *when)
+{
+	char buf[96], *p;
+
+	p = fmt_str(buf, when);
+	p = fmt_str(p, " gfsr=");
+	p = fmt_hex(p, rd32(SMMU + 0x48), 8);
+	p = fmt_str(p, " syn0=");
+	p = fmt_hex(p, rd32(SMMU + 0x50), 8);
+	p = fmt_str(p, " syn1=");
+	p = fmt_hex(p, rd32(SMMU + 0x54), 8);
+	if (smmu_cb) {
+		p = fmt_str(p, " cbfsr=");
+		p = fmt_hex(p, rd32(smmu_cb + 0x58), 8);
+		p = fmt_str(p, " far=");
+		fmt_hex(p, rd32(smmu_cb + 0x60), 8);
+	}
+	con_line("", buf);
+}
 
 static int smmu_bypass_gpi(char *buf)
 {
@@ -481,6 +512,7 @@ static int smmu_bypass_gpi(char *buf)
 	if (free_smr < 0 || ncb == 0)
 		return -1;
 	uint32_t cb = ncb - 1;
+	smmu_cb = SMMU + ((uintptr_t)(numpage + cb) << pgshift);
 	w32(SMMU + ((uintptr_t)(numpage + cb) << pgshift), 0);		/* CB SCTLR: translation off */
 	w32(SMMU + (1UL << pgshift) + 4 * cb, 1U << 16);		/* GR1 CBAR: S1 (bypassed), S2 bypass */
 	w32(SMMU + 0xc00 + 4 * (uint32_t)free_smr, cb);			/* S2CR: translate via cb */
