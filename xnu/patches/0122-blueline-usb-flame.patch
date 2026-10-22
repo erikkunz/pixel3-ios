@@ -1,0 +1,192 @@
+From afd49cf6211d90ed5b1a1c5111d771ed24e5480e Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Fri, 23 Oct 2026 00:48:07 +0200
+Subject: [PATCH] 0122: flame's USB (SMMU bank as ABL, live log, command and
+ file servers) on SDM845
+
+---
+ bsd/conf/files         |  2 ++
+ bsd/dev/sweet_ufs.c    |  5 +++++
+ bsd/dev/sweet_usb.c    | 39 +++++++++++++++++++++++----------------
+ bsd/vfs/vfs_syscalls.c | 32 ++++++++++++++++++++++++++++++++
+ 4 files changed, 62 insertions(+), 16 deletions(-)
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 48696c2..d94b227 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -110,6 +110,8 @@ bsd/dev/blueline_keys.c			standard
+ bsd/dev/blueline_touch.c		standard
+ bsd/dev/blueline_cpufreq.c		standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_poke.c			standard
++bsd/dev/sweet_files.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index ad3a413..6b70a9a 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -609,6 +609,11 @@ sweet_ufs_init(void)
+ 	blueline_touch_init();
+ 	/* USB device mode, CDC-ECM, live console log (sweet_usb.c, boot-arg sweetusb). */
+ 	sweet_usb_probe();
++	{
++		/* register poke scripts (ADT /chosen/sweet-poke, or over USB): bsd/dev/sweet_poke.c */
++		extern void sweet_poke_start(void);
++		sweet_poke_start();
++	}
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index 032adc8..2e182a9 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -3,7 +3,8 @@
+  *
+  * The phone's USB is a Synopsys DWC3 (USB 2.0 only, maximum-speed
+  * high-speed) at 0x0a600000 behind Qualcomm's dwc-usb3-msm wrapper, with a
+- * QUSB2 PHY at 0x088e2000 (flame: Synopsys femto HS PHY, same address); its power domain is the USB30_PRIM GDSC and its
++ * QUSB2 PHY at 0x088e2000 (flame: Synopsys femto HS PHY, same address;
++ * blueline: QUSB2 v2, as the Redmi); its power domain is the USB30_PRIM GDSC and its
+  * clocks come from GCC (offsets from Linux gcc-sdmmagpie.c). ABL uses this
+  * controller for fastboot; this probe only reports what state it is left
+  * in after `fastboot boot`. It never writes a register, and it touches the
+@@ -52,13 +53,13 @@ static const struct {
+ 	const char *name;
+ 	uint32_t    off;
+ } usb_cbcr[] = {
+-	/* flame (SM8150, gcc-sm8150.c); index 0 master and 3 cfg-noc-axi gate DWC3 reads */
+-	{ "master", 0x0f010 },
+-	{ "sleep", 0x0f014 },
+-	{ "utmi", 0x0f018 },
+-	{ "cfg-noc-axi", 0x0f078 },
+-	{ "aggre-axi", 0x0f07c },
+-	{ "phy-aux", 0x0f050 },
++	/* blueline (SDM845, gcc-sdm845.c); index 0 master and 3 cfg-noc-axi gate DWC3 reads */
++	{ "master", 0x0f00c },
++	{ "sleep", 0x0f010 },
++	{ "utmi", 0x0f014 },
++	{ "cfg-noc-axi", 0x0502c },
++	{ "aggre-axi", 0x8201c },
++	{ "phy-aux", 0x0f04c },
+ 	{ "clkref", 0x8c008 },
+ };
+ 
+@@ -997,7 +998,7 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+ 
+ /*
+  * flame: the DWC3 masters through the apps SMMU (MMU-500 at 0x15000000) as
+- * stream 0x140 (DT iommus). ABL removes its stream-match entry when it
++ * stream 0x740 (DT iommus). ABL removes its stream-match entry when it
+  * leaves fastboot, and the SMMU faults unmatched streams (sCR0.USFCFG), so
+  * the first DMA (the ep0 TRB fetch) raised a global fault and the SoC
+  * reset. A bypass S2CR is refused (it reads back as type 2, fault: the
+@@ -1006,6 +1007,7 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+  * buffers (below 4 GB, see sweetusbdma), as Normal non-cacheable.
+  */
+ #define AS_PA           0x15000000ULL
++#define UD_USB_SID      0x740           /* blueline: SDM845 DT iommus = <&apps_smmu 0x740 0> (flame 0x140) */
+ #define AS_SIZE         0x100000
+ #define UD_PT_OFF       0x100000        /* page tables 1 MB above the DMA buffers */
+ 
+@@ -1033,8 +1035,8 @@ ud_smmu_setup(uint64_t dma_pa)
+ 		if (((c >> 16) & 3) == 0) {
+ 			used[(c & 0xff) / 64] |= 1ULL << ((c & 0xff) % 64);
+ 		}
+-		if (((0x140 ^ (m & 0x7fff)) & ~((m >> 16) & 0x7fff) & 0x7fff) == 0) {
+-			printf("SWEET USB: SMMU smr%u %x already matches 0x140 (s2cr %x)\n", i, m, c);
++		if (((UD_USB_SID ^ (m & 0x7fff)) & ~((m >> 16) & 0x7fff) & 0x7fff) == 0) {
++			printf("SWEET USB: SMMU smr%u %x already matches 0x740 (s2cr %x)\n", i, m, c);
+ 			return -1;
+ 		}
+ 	}
+@@ -1050,8 +1052,8 @@ ud_smmu_setup(uint64_t dma_pa)
+ 	 * ABL's own DMA streams (UFS 0x300 etc., SMR0-3) point at banks with
+ 	 * CBAR 0x1f000 (S1, S2 bypass), CBA2R 1 and SCTLR 0xe0: translation
+ 	 * OFF, i.e. physical addresses, the bypass the hypervisor refuses to
+-	 * take as an S2CR type (poke dump, 2026-10-20). Do the same for 0x140.
+-	 * (Pointing 0x140 at the UFS bank itself stalled this thread; our own
++	 * take as an S2CR type (poke dump, 2026-10-20). Do the same for 0x740.
++	 * (Pointing 0x740 at the UFS bank itself stalled this thread; our own
+ 	 * bank with tables gave translation faults.) sweetusbsmmu=1: tables.
+ 	 */
+ 	int mode = 0;
+@@ -1063,7 +1065,7 @@ ud_smmu_setup(uint64_t dma_pa)
+ 		*(volatile uint32_t *)(as + pagesz + 4 * cb) = 0x1f000;        /* CBAR as ABL's banks */
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		*(volatile uint32_t *)(as + 0xc00 + 4 * free_smr) = (uint32_t)cb;
+-		*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | 0x140;
++		*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | UD_USB_SID;
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		ud_smmu_cb = cbv;
+ 		printf("SWEET USB: SMMU smr%d %x s2cr %x -> cb%d cbar %x cba2r %x sctlr %x (translation off, as ABL)\n",
+@@ -1122,7 +1124,7 @@ ud_smmu_setup(uint64_t dma_pa)
+ 		delay(1);
+ 	}
+ 	*(volatile uint32_t *)(as + 0xc00 + 4 * free_smr) = (uint32_t)cb;      /* translate via cb */
+-	*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | 0x140;
++	*(volatile uint32_t *)(as + 0x800 + 4 * free_smr) = (1u << 31) | UD_USB_SID;
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	/* Self-test: read back our descriptors and ask the SMMU to translate (ATS1PR). */
+ 	printf("SWEET USB: SMMU pt L1[%llu] %llx L2[%llu] %llx tcr %x tcr2 %x mair0 %x ttbr0 %x:%x\n",
+@@ -1183,8 +1185,13 @@ ud_hsphy_dump(vm_offset_t p, const char *when)
+ static void
+ ud_hsphy_init(void)
+ {
+-	int doinit = 1;
++	/* blueline: the HS PHY is a QUSB2 v2, set up by ABL and used as is;
++	 * this femto-PHY sequence (flame) only runs with sweethsphy=1. */
++	int doinit = 0;
+ 	PE_parse_boot_argn("sweethsphy", &doinit, sizeof(doinit));
++	if (!doinit) {
++		return;
++	}
+ 	vm_offset_t p = ml_io_map(HSPHY_PA, 0x1000);
+ 	if (!p) {
+ 		return;
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 90e68bb..f0bb533 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -14579,3 +14579,35 @@ fs_snapshot(__unused proc_t p, struct fs_snapshot_args *uap,
+ 
+ 	return error;
+ }
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * Kernel-path wrappers for the SWEET file server (bsd/dev/sweet_files.c):
++ * installs tools into the running root over USB Ethernet.
++ */
++int sweet_vfs_mkdir(const char *path, int mode);
++int sweet_vfs_symlink(const char *target, const char *link);
++int sweet_vfs_unlink(const char *path);
++
++int
++sweet_vfs_mkdir(const char *path, int mode)
++{
++	struct vnode_attr va;
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_mode, (mode & ACCESSPERMS) & ~0);
++	return mkdir1at(vfs_context_kernel(), CAST_USER_ADDR_T(path), &va, AT_FDCWD, UIO_SYSSPACE);
++}
++
++int
++sweet_vfs_symlink(const char *target, const char *link)
++{
++	return symlinkat_internal(vfs_context_kernel(), CAST_USER_ADDR_T(target), AT_FDCWD,
++	           CAST_USER_ADDR_T(link), UIO_SYSSPACE);
++}
++
++int
++sweet_vfs_unlink(const char *path)
++{
++	return unlink1(vfs_context_kernel(), NULLVP, CAST_USER_ADDR_T(path), UIO_SYSSPACE, 0);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+-- 
+2.54.0 (Apple Git-157)
+
