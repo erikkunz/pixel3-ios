@@ -22,7 +22,7 @@
 #define HOLD_SECONDS	2
 #else
 #define LIVE_SECONDS	30
-#define HOLD_SECONDS	30
+#define HOLD_SECONDS	90
 #endif
 
 /* ---- device tree: find the touchscreen ---- */
@@ -263,6 +263,7 @@ static volatile uint32_t gpi_ev_ring[EV_ELEMS * 4] __attribute__((aligned(4096))
 static volatile uint8_t gpi_buf[2][64] __attribute__((aligned(64)));
 static uint32_t gpi_ch_wp[2], gpi_ev_rp, gpi_ev_wp, gpii, gpi_mode;
 static uint32_t gpi_ev[4];		/* the last event, for the screen */
+static uint32_t gpi_trace = 1;		/* progress lines for the first transfer */
 
 static uint32_t gpi_state(uintptr_t cntxt)
 {
@@ -407,8 +408,12 @@ static int gpi_fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_
 	gpi_tre(0, 12U | (5U << 8) | (24U << 16) | (3U << 24), 0, 2U, TRE_CONFIG0 | TRE_CHAIN);
 	gpi_tre(0, I2C_WRITE | (FTS_ADDR << 8) | (1U << 26), 0, clen, TRE_GO | TRE_CHAIN);
 	gpi_tre(0, (uint32_t)tx, (uint32_t)((uint64_t)tx >> 32), clen, TRE_DMA | TRE_IEOT);
+	if (gpi_trace)
+		con_line("", "gpi: write TREs queued, ringing TX doorbell");
 	gpi_ring(0);
 	rc = gpi_wait_xfer(0);
+	if (gpi_trace)
+		con_line("", rc ? "gpi: write failed" : "gpi: write done, reading");
 	if (rc)
 		return rc;
 	gpi_tre(1, (uint32_t)rx, (uint32_t)((uint64_t)rx >> 32), len, TRE_DMA | TRE_IEOT);
@@ -419,6 +424,76 @@ static int gpi_fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_
 	for (uint32_t i = 0; i < len; i++)
 		out[i] = gpi_buf[1][i];
 	return rc ? rc - 10 : 0;
+}
+
+/*
+ * The GPI engine's DMA goes through the apps SMMU as stream 0x16 (DT iommus).
+ * Unless the firmware matched that stream, its first descriptor fetch faults.
+ * Linux's way on SDM845 (arm-smmu-qcom.c: the hypervisor turns S2CR "bypass"
+ * into "fault"): the last context bank with translation off (S1 bypass),
+ * and a free stream match entry for 0x16 pointing at it.
+ */
+#define SMMU		0x15000000UL
+#define GPI_SID		0x16U
+
+static int smmu_bypass_gpi(char *buf)
+{
+	uint32_t idr0 = rd32(SMMU + 0x20), idr1 = rd32(SMMU + 0x24);
+	uint32_t nsmr = idr0 & 0xff, ncb = idr1 & 0xff, pgshift = (idr1 >> 31) ? 16 : 12;
+	uint32_t numpage = 1U << ((idr1 >> 28 & 7) + 1);
+	int match = -1, free_smr = -1, valid = 0;
+	char *p;
+
+	if (nsmr > 128)
+		nsmr = 128;
+	for (uint32_t i = 0; i < nsmr; i++) {
+		uint32_t smr = rd32(SMMU + 0x800 + 4 * i);
+		if (!(smr >> 31)) {
+			if (free_smr < 0)
+				free_smr = (int)i;
+			continue;
+		}
+		valid++;
+		uint32_t mask = smr >> 16 & 0x7fff, id = smr & 0xffff;
+		if (((id ^ GPI_SID) & ~mask) == 0 && match < 0)
+			match = (int)i;
+	}
+	p = fmt_str(buf, "scr0=");
+	p = fmt_hex(p, rd32(SMMU), 8);
+	p = fmt_str(p, " smr ");
+	p = fmt_dec(p, (uint64_t)valid);
+	p = fmt_str(p, "/");
+	p = fmt_dec(p, nsmr);
+	p = fmt_str(p, " cb ");
+	p = fmt_dec(p, ncb);
+	p = fmt_str(p, " sid16: ");
+	if (match >= 0) {
+		p = fmt_str(p, "smr ");
+		p = fmt_dec(p, (uint64_t)match);
+		p = fmt_str(p, " s2cr=");
+		fmt_hex(p, rd32(SMMU + 0xc00 + 4 * (uint32_t)match), 8);
+		con_line("SMMU", buf);
+		return 0;		/* already routed by the firmware: leave it */
+	}
+	p = fmt_str(p, "none");
+	con_line("SMMU", buf);
+	if (free_smr < 0 || ncb == 0)
+		return -1;
+	uint32_t cb = ncb - 1;
+	w32(SMMU + ((uintptr_t)(numpage + cb) << pgshift), 0);		/* CB SCTLR: translation off */
+	w32(SMMU + (1UL << pgshift) + 4 * cb, 1U << 16);		/* GR1 CBAR: S1 (bypassed), S2 bypass */
+	w32(SMMU + 0xc00 + 4 * (uint32_t)free_smr, cb);			/* S2CR: translate via cb */
+	w32(SMMU + 0x800 + 4 * (uint32_t)free_smr, (1U << 31) | GPI_SID);	/* SMR: valid, exact match */
+	p = fmt_str(buf, "sid16 -> smr ");
+	p = fmt_dec(p, (uint64_t)free_smr);
+	p = fmt_str(p, " cb ");
+	p = fmt_dec(p, cb);
+	p = fmt_str(p, " readback smr=");
+	p = fmt_hex(p, rd32(SMMU + 0x800 + 4 * (uint32_t)free_smr), 8);
+	p = fmt_str(p, " s2cr=");
+	fmt_hex(p, rd32(SMMU + 0xc00 + 4 * (uint32_t)free_smr), 8);
+	con_line("", buf);
+	return 0;
 }
 
 /* GENI side of GPI mode (geni_se_select_gpi_mode()), then a free GPII. */
@@ -435,6 +510,8 @@ static int gpi_setup(char *buf)
 	w32(SE + 0x614, rd32(SE + 0x614) & ~(M_CMD_DONE | (1U << 26) | (1U << 27) | (1U << 30)));
 	w32(SE + SE_DMA_MODE, 1U);		/* GENI_DMA_MODE_EN */
 	w32(SE + 0xe18, rd32(SE + 0xe18) | 0xfU);	/* SE_GSI_EVENT_EN: DMA RX/TX, M, S */
+	if (smmu_bypass_gpi(buf))
+		return -1;
 
 	/* States the firmware left (ch0 ch1 ev, 0 = free); the first free GPII of the mask is taken. */
 	p = fmt_str(buf, "gpii");
@@ -557,6 +634,7 @@ static void show_touch_bus(void)
 	fmt_hex(p, rd32(SE + 0x614), 4);
 	con_line("", buf);
 	int rc = fts_read(id_cmd, sizeof(id_cmd), id, sizeof(id));
+	gpi_trace = 0;
 	p = fmt_str(buf, "after cmd: m_cmd0=");
 	p = fmt_hex(p, rd32(SE + SE_M_CMD0), 8);
 	p = fmt_str(p, " st=");
