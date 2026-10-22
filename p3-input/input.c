@@ -558,7 +558,7 @@ static int smmu_bypass_gpi(char *buf)
 }
 
 /* GENI side of GPI mode (geni_se_select_gpi_mode()), then a free GPII. */
-static int gpi_setup(char *buf)
+static int __attribute__((unused)) gpi_setup(char *buf)
 {
 	char *p;
 	int rc = -1;
@@ -611,8 +611,180 @@ static int gpi_setup(char *buf)
 	return rc;
 }
 
+/*
+ * ---- I2C bit-banged on the SE's own pins ----
+ * GPI DMA takes the SoC down on its first transfer (no interconnect vote for
+ * the QUP-to-memory path?), so, as HackiOS does with its touch panel's SPI,
+ * the bus is driven by hand: GPIO 27 (SDA) and 28 (SCL) as plain GPIOs,
+ * open drain by switching the output enable with the output held low,
+ * pull-ups on. About 100 kHz.
+ */
+#define BB_SDA		27
+#define BB_SCL		28
+static uint32_t bb_mode;
+
+static void bb_pin(int pin, int high)
+{
+	/* released: input with pull-up; low: output enabled, driving 0 */
+	w32(GPIO_CFG(TLMM_EAST, pin), (high ? 0 : (1U << 9)) | (2U << 6) | 3U);
+}
+
+static int bb_get(int pin)
+{
+	return rd32(GPIO_IO(TLMM_EAST, pin)) & 1;
+}
+
+static void bb_half(void)
+{
+	spin_us(5);
+}
+
+static int bb_scl_high(void)
+{
+	uint64_t end = now() + ticks_per_s() / 1000;	/* clock stretching: 1 ms at most */
+
+	bb_pin(BB_SCL, 1);
+	while (!bb_get(BB_SCL))
+		if (now() > end)
+			return -1;
+	return 0;
+}
+
+static void bb_start(void)
+{
+	bb_pin(BB_SDA, 1);
+	bb_scl_high();
+	bb_half();
+	bb_pin(BB_SDA, 0);
+	bb_half();
+	bb_pin(BB_SCL, 0);
+	bb_half();
+}
+
+static void bb_stop(void)
+{
+	bb_pin(BB_SDA, 0);
+	bb_half();
+	bb_scl_high();
+	bb_half();
+	bb_pin(BB_SDA, 1);
+	bb_half();
+}
+
+/* One byte out; 0 when the device acknowledged it. */
+static int bb_write(uint8_t b)
+{
+	for (int i = 7; i >= 0; i--) {
+		bb_pin(BB_SDA, b >> i & 1);
+		bb_half();
+		bb_scl_high();
+		bb_half();
+		bb_pin(BB_SCL, 0);
+	}
+	bb_pin(BB_SDA, 1);
+	bb_half();
+	bb_scl_high();
+	int nack = bb_get(BB_SDA);
+	bb_half();
+	bb_pin(BB_SCL, 0);
+	return nack ? -1 : 0;
+}
+
+static uint8_t bb_read(int ack)
+{
+	uint8_t b = 0;
+
+	bb_pin(BB_SDA, 1);
+	for (int i = 0; i < 8; i++) {
+		bb_half();
+		bb_scl_high();
+		b = (uint8_t)(b << 1 | bb_get(BB_SDA));
+		bb_half();
+		bb_pin(BB_SCL, 0);
+	}
+	bb_pin(BB_SDA, !ack);
+	bb_half();
+	bb_scl_high();
+	bb_half();
+	bb_pin(BB_SCL, 0);
+	bb_pin(BB_SDA, 1);
+	return b;
+}
+
+static int bb_fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
+{
+	int rc = 0;
+
+	bb_start();
+	if (bb_write(FTS_ADDR << 1)) {
+		rc = -1;			/* address not acknowledged */
+		goto out;
+	}
+	for (uint32_t i = 0; i < clen; i++)
+		if (bb_write(cmd[i])) {
+			rc = -2;
+			goto out;
+		}
+	bb_start();				/* repeated start */
+	if (bb_write(FTS_ADDR << 1 | 1)) {
+		rc = -3;
+		goto out;
+	}
+	for (uint32_t i = 0; i < len; i++)
+		out[i] = bb_read(i + 1 < len);
+out:
+	bb_stop();
+	return rc;
+}
+
+/* Bus idle (both lines high once released)? Then: does anything answer at 0x49? Per GPIO 136 setting. */
+static int bb_setup(char *buf)
+{
+	char *p;
+	int found = 0;
+
+	w32(GPIO_IO(TLMM_EAST, BB_SDA), 0);	/* output value 0: "low" = output enabled */
+	w32(GPIO_IO(TLMM_EAST, BB_SCL), 0);
+	bb_pin(BB_SDA, 1);
+	bb_pin(BB_SCL, 1);
+	spin_us(100);
+	for (int sw = 0; sw < 3 && !found; sw++) {
+		if (sw == 1) {			/* bus switch: drive GPIO 136 low */
+			w32(GPIO_IO(TLMM_NORTH, 136), 0);
+			w32(GPIO_CFG(TLMM_NORTH, 136), 1U << 9);
+		} else if (sw == 2) {		/* ... and high */
+			w32(GPIO_IO(TLMM_NORTH, 136), 2U);
+			w32(GPIO_CFG(TLMM_NORTH, 136), 1U << 9);
+		}
+		spin_us(1000);
+		/* nine clocks free a device stuck mid-byte */
+		for (int i = 0; i < 9; i++) {
+			bb_pin(BB_SCL, 0);
+			bb_half();
+			bb_scl_high();
+			bb_half();
+		}
+		bb_stop();
+		p = fmt_str(buf, sw == 0 ? "sw136 as left: " : sw == 1 ? "sw136 low: " : "sw136 high: ");
+		p = fmt_str(p, "sda=");
+		p = fmt_dec(p, (uint64_t)bb_get(BB_SDA));
+		p = fmt_str(p, " scl=");
+		p = fmt_dec(p, (uint64_t)bb_get(BB_SCL));
+		bb_start();
+		int nack = bb_write(FTS_ADDR << 1);
+		bb_stop();
+		p = fmt_str(p, nack ? " 0x49 no ack" : " 0x49 ACK");
+		con_line(sw == 0 ? "BITBANG" : "", buf);
+		found = !nack;
+	}
+	bb_mode = found;
+	return found ? 0 : -1;
+}
+
 static int fts_read(const uint8_t *cmd, uint32_t clen, uint8_t *out, uint32_t len)
 {
+	if (bb_mode)
+		return bb_fts_read(cmd, clen, out, len);
 	if (gpi_mode)
 		return gpi_fts_read(cmd, clen, out, len);
 	int rc = i2c_xfer(0, cmd, 0, clen, 1);
@@ -686,7 +858,8 @@ static void show_touch_bus(void)
 	p = fmt_hex(p, rd32(SE + 0x064), 8);
 	p = fmt_str(p, rd32(SE + 0x064) & 1 ? " FIFO OFF (DMA only)" : " fifo ok");
 	con_line("", buf);
-	if ((rd32(SE + 0x064) & 1) && gpi_setup(buf))
+	/* FIFO off: GPI DMA (gpi_setup()) crashes the SoC, so bit-bang the bus instead. */
+	if ((rd32(SE + 0x064) & 1) && bb_setup(buf))
 		return;
 	p = fmt_str(buf, "geni st=");
 	p = fmt_hex(p, rd32(SE + 0x040), 8);
