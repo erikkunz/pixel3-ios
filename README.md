@@ -385,6 +385,14 @@ After that, touching and dragging produced live motion events (`23 01 ...`, x=50
 
 `0113` + `0114` (cmd-db mapped at a fixed 128 KiB: the second word of the locator is not a size, and with the old check the RPMh vote never went out) on 4 cores (`cpus=4 wfi=0`, `shim-touch4b.img`): **touch works in iOS**. Swiping on the lock screen opened the Focus menu. Two layout issues: the canvas was cropped (the presented 1125x2436 cut to 1080x2160, which lost 138 rows top and bottom), and it is slow on the 4 Silver cores. `0115-blueline-display-fit.patch` scales the canvas to the panel's height instead (nearest neighbour, 997x2160 with 41-column black bars) and maps touch the same way. `bluefb_fit=0` brings back the crop. Confirmed on the phone (8 cores, 23:18): the whole screen is visible and touch lines up. In the last few boots, 8 cores (`cpus=8`, real WFI) stalled at the "SWEET SMP" lines 3 times out of 6.
 
+### 8 cores, SMP stall, panel rate (2026-10-22, late)
+
+`0116-blueline-smp-diag.patch` adds a second stats line per CPU: IPIs sent, `cpu_signal`, the scheduler's state, priority and thread, and the GICR SGI pending/enable bits and WAKER. A stall captured with it (`work/log-diag8.txt`): the Gold cores' IPIs and timers work. cpu4 later took 4,415 timer interrupts and 100 IPIs, and cpu5-7 fired their armed timers. Boot stopped right after `exec init_featureflags` (in an older stall: `exec seputil`), with the same user thread (priority 31) running on cpu0 in every sample. So an early boot-task process spins forever, and only with 8 cores. Next stall: `sweetsample=init_featureflags,seputil,launchd` shows its user stack. Three boots of the sampling image went through. In good boots all 8 cores carry load (Gold at 2649 MHz, Silver at 1766 MHz).
+
+The panel copy rate goes from `sweetfb_hz=10` (chosen for 4 slow cores) to 30 on 8 cores (`shim-hz30.img`), against the jitter.
+
+GPU, the next big step: HackiOS's staged Adreno 642L bring-up (`redwood_adreno.c`: GX/CX power, GMU firmware and HFI, zap shader through TrustZone, SQE microcode, a test picture) is the template for our Adreno 630 (same A6xx family, also with a GMU). On the user side: Mesa freedreno (a630 is well supported) behind an EAGL bridge in backboardd.
+
 ### Other ports worth following
 
 - **ios-sailfish** (Pixel 1, Snapdragon 821; owner known to us): GPU
