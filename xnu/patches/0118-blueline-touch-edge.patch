@@ -1,0 +1,61 @@
+From add236d1e8eb369c2b47c3d7ec7de80cdc44a721 Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Fri, 23 Oct 2026 00:02:21 +0200
+Subject: [PATCH] 0118: edge-tip flag for touches that start at an edge (home
+ gesture)
+
+---
+ iokit/Kernel/arm/hid/SweetHID.cpp | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 4fd2840..7f92aa7 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -348,6 +348,14 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
+  * absolute digitizers.
+  */
+ #define SWEET_TOUCH_FINGERS 10
++/*
++ * Contacts that start this close to an edge of the picture (panel pixels,
++ * ~3 mm) carry kIOHIDDigitizerEventFromEdgeTip for their whole life, as
++ * Apple's touch firmware reports them: UIKit takes the edge type of a touch
++ * from that bit, and without it there is no home or app-switcher gesture
++ * (ios-sweet 0071, here for the 1080x2160 panel and the scaled picture).
++ */
++#define BLUE_TOUCH_EDGE_PX 48
+ class SweetHIDTouch : public IOHIDEventService {
+ 	OSDeclareDefaultStructors(SweetHIDTouch);
+ public:
+@@ -362,6 +370,7 @@ private:
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
+ 	int fFitX, fFitW;	/* bluefb_fit: panel columns the scaled display covers, 0 = crop */
+ 	bool fDown[SWEET_TOUCH_FINGERS];
++	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+ 	IOFixed fY[SWEET_TOUCH_FINGERS];
+ };
+@@ -470,6 +479,11 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		nx = (IOFixed)(((int64_t)fx << 16) / fFitW);
+ 		ny = (IOFixed)(((int64_t)y << 16) / 2160);
+ 	}
++	if (!was && down) {
++		int left = fFitW ? fFitX : 0, right = fFitW ? fFitX + fFitW - 1 : 1079;
++		fEdge[finger] = x < left + BLUE_TOUCH_EDGE_PX || x > right - BLUE_TOUCH_EDGE_PX ||
++		    y < BLUE_TOUCH_EDGE_PX || y > 2159 - BLUE_TOUCH_EDGE_PX;
++	}
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+@@ -496,7 +510,7 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		if (!child) {
+ 			continue;
+ 		}
+-		UInt32 mask = 0;
++		UInt32 mask = fEdge[i] ? kIOHIDDigitizerEventFromEdgeTip : 0;
+ 		if (i == finger) {
+ 			if (was != down) {
+ 				mask |= kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange;
+-- 
+2.54.0 (Apple Git-157)
+
