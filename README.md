@@ -415,7 +415,7 @@ about 1 M IPIs each), securityd's `aks_wrap_key` now returns 0. The run was stop
 question is still open; bluetoothd (106) and fairplayd (70) restarted all along. Next:
 `shim-idle8.img` (0112, `cpus=8` with real WFI), booted 21:24.
 
-### HackiOS userland changes (prepared, not flashed)
+### HackiOS userland changes (flashed 2026-10-22)
 
 `tools/iosroot-tweaks.py` now does what HackiOS's userland does. It marks the
 data migration done for 20H392 (`LastSystemVersion` plus
@@ -429,6 +429,11 @@ tested: whether lsd builds LaunchServices from /Applications without the
 migration, as it does for them. Cycle: `tools/phone.sh sync
 work/ios-root.img` (recovery), `tools/tweak-diff.sh`, then flash
 `work/diff.simg` (with approval).
+Flashed as a 2.6 MiB diff: 52 launchd jobs removed (all Bluetooth, the Wi-Fi
+daemons, routined, syncdefaultsd, homed, keybagd, watchdogd, ...). No job label contains
+"datamigrator", so only the done-records skip the migration. fairplayd is not on the
+list. `shim-idle8.img` booted on it at 21:58. The run before it (idle8 on the old root)
+had 8 cores with real WFI, all handling timers and IPIs.
 
 ### Migration stuck at the end of the bar: keychain (2026-10-22)
 
