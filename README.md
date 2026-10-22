@@ -29,6 +29,8 @@ partition.
 
 **Being worked on:** USB Ethernet (live kernel log, command and file servers; ported from ios-flame, not yet
 working on the phone), the removable system apps and wallpapers after migration.
+**Known issue:** the power button locks the phone, but the panel is never switched off: it keeps showing
+the last frame (ios-sweet's 0079 display-power patch is the likely fix).
 **Not working yet:** GPU / Metal, Wi-Fi, real battery readings, the RTC (time of day), audio, camera,
 Bluetooth, cellular, sensors, Face ID / SEP.
 
