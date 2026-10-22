@@ -4,7 +4,8 @@
   sudo tools/migration-reset.py MOUNTED_ROOT
 
 Removes the "migration already done" markers iosroot-tweaks.py used to set
-(LastSystemVersion, DMUserDataDisposition in com.apple.migration) and
+(LastSystemVersion, DMUserDataDisposition, DMLastMigrationResults in
+com.apple.migration) and
 creates datamigrator's own sentinel, /private/var/datamigrator/migrate
 ("Migration sentinel present. Migration necessary."). The full migration
 also seeds the LaunchServices database, which lsd otherwise waits for
@@ -27,7 +28,7 @@ def main():
         st = os.stat(pref)
         with open(pref, 'rb') as f:
             data = plistlib.load(f)
-        removed = [k for k in ('LastSystemVersion', 'DMUserDataDisposition') if data.pop(k, None) is not None]
+        removed = [k for k in ('LastSystemVersion', 'DMUserDataDisposition', 'DMLastMigrationResults') if data.pop(k, None) is not None]
         with open(pref, 'wb') as f:
             plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
         os.chown(pref, st.st_uid, st.st_gid)

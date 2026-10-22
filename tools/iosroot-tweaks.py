@@ -35,11 +35,12 @@ MOBILE = 501
 # (hackios-xnu-userland, userland/mkjobs.py): each of these is missing its
 # hardware or service here and crashes or is restarted over and over;
 # syncdefaultsd aborts part-way through the migration pass.
+# (mobileassetd stays: wallpapers and posters come as mobile assets.)
 DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'locationd', 'softwareupdate',
         'datamigrator', 'backupd', 'thermalmonitord', 'keybagd', 'nfcd', 'biometrickitd', 'pearld',
         'obliterat', 'storage_mounter', 'com.apple.fud', 'sepd', 'seputil', 'camera', 'ReportCrash',
         'osanalytics', 'lockdown', 'audio', 'jetsamproperties', 'purplebuddy', 'restore', 'usb',
-        'accessoryd', 'mobileassetd', 'bird', 'homed', 'routined', 'duetexpertd', 'com.apple.dmd',
+        'accessoryd', 'bird', 'homed', 'routined', 'duetexpertd', 'com.apple.dmd',
         'syncdefaultsd', 'photoanalysisd', 'avconferenced')
 
 
