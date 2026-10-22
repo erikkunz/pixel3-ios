@@ -1,0 +1,31 @@
+From a60110d1d4e31e42dd03f0c4d6528394ce2c2968 Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Thu, 22 Oct 2026 09:57:14 +0200
+Subject: [PATCH] 0112: no set/way cache flush in cpu_idle
+
+---
+ osfmk/arm64/cpu.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index 6598d9f..dc95e78 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -568,7 +568,13 @@ cpu_idle(void)
+ #endif /* MONOTONIC */
+ 
+ 	if (wfi) {
+-#if !defined(APPLE_ARM64_ARCH_FAMILY)
++#if !defined(APPLE_ARM64_ARCH_FAMILY) && !defined(SWEET)
++		/*
++		 * Not on blueline: its cores stay coherent while they wait, and this
++		 * cleans the whole D-cache by set/way on every idle. That is slow,
++		 * unsafe with other cores running, and each set/way op traps to
++		 * Qualcomm's hypervisor (finding from HackiOS, oosexgang).
++		 */
+ 		platform_cache_idle_enter();
+ #endif
+ 
+-- 
+2.54.0 (Apple Git-157)
+

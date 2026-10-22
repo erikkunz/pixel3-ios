@@ -390,6 +390,23 @@ client (`SWEET HID: key 0x30/0xea ... (1 clients)`). Rebooted 21:56 with
   empty `IOAcceleratorES` (`sweetaccel=0` off). Candidate for the
   `usermanagerd`/LaunchServices waits.
 
+- **HackiOS** ([hackios-xnu-kernel](https://github.com/oosexgang/hackios-xnu-kernel),
+  [hackios-xnu-userland](https://github.com/oosexgang/hackios-xnu-userland);
+  POCO X5 Pro, SM7325): lock screen in ~20 s on 8 cores, Adreno via Mesa,
+  Wi-Fi, sound, camera. A different foundation from ours: xnu-8796.121.2
+  built on Linux with stock clang, their own platform expert/GIC/PSCI SMP,
+  APFS and ramfs drivers, MiniIOSurface/framebuffer/keystore, AMFI/Sandbox
+  MAC stand-ins, an EFI loader started from Mu-Silicium UEFI, and an iOS 16.5
+  root (we run 16.7.16). Their `docs/PORTING.md` starts with a UEFI port;
+  Mu-Silicium has SDM845 devices (polaris, equuleus) but no Pixel 3.
+  Taken so far: `0112-blueline-idle-no-setway-flush.patch`. XNU's
+  `cpu_idle()` on non-Apple cores cleans the whole D-cache by set/way on
+  every WFI, which is unsafe with other cores running and traps to
+  Qualcomm's hypervisor. That is the likely cause of our `wfi=0` workaround
+  and the 8-core stalls. Next candidates: their small-core scheduler pairing
+  (A55s run only when the big cores are busy), the memorystatus thresholds
+  fix, and their keystore.
+
 ### Migration stuck at the end of the bar: keychain (2026-10-22)
 
 Overnight 4-core run with 0107: the bar stopped at the same point (the last
