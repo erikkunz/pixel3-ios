@@ -58,7 +58,7 @@ fetch() {	# DIR REPO SHA
 		git -C "$1" fetch -q --depth 1 "$2" "$3"
 		git -C "$1" checkout -q FETCH_HEAD
 	fi
-	git -C "$1" reset -q --hard && git -C "$1" clean -fdq	# undo the previous run's patch copies
+	git -C "$1" reset -q --hard && git -C "$1" clean -ffdxq	# a clean tree each run (also the ignored, already patched xnu/ source)
 }
 cd "$work"
 fetch dxb "$DXB_REPO" "$DXB_SHA"
