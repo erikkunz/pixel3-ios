@@ -108,7 +108,7 @@ chown 0:0 "$root/private/var/keybags/systembag.kb"
 chmod 0600 "$root/private/var/keybags/systembag.kb"
 
 if [[ -x $here/iosroot-tweaks.py ]]; then
-	python3 "$here/iosroot-tweaks.py" "$root"
+	python3 "$here/iosroot-tweaks.py" --fresh "$root"	# never booted: let the migration run
 fi
 
 df -h "$root"

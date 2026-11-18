@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Bring-up changes to the iOS root made by tools/mkiosroot.sh.
 
-  sudo tools/iosroot-tweaks.py MOUNTED_ROOT
+  sudo tools/iosroot-tweaks.py [--fresh] MOUNTED_ROOT
+
+--fresh is for a root that has never booted (tools/mkiosroot.sh passes it):
+the first-boot data migration is left to run instead of being recorded as
+done. Without it (tools/tweak-diff.sh on a phone's root) the migration is
+recorded as done, which is only right once it has run once.
 
 Idempotent; run as root (files keep their owners). What each change is for
 (findings from ios-sweet's bring-up on the same iOS build, see their
@@ -12,8 +17,11 @@ NOTES.md; the code here is our own):
                   jobs that crash and restart forever without the hardware
                   or services they expect removed (DENY, HackiOS's list)
   containers      /private/var/containers/... exist (normally the data volume)
-  migration       recorded as done for this build, datamigrator not loaded
-                  (as HackiOS does; lsd builds its database from /Applications)
+  migration       recorded as done for this build (as HackiOS does). On a
+                  root that has never migrated this leaves the LaunchServices
+                  database unseeded and SpringBoard waits behind the Apple
+                  logo forever, so with --fresh it is set to run instead
+                  (datamigrator's sentinel, as tools/migration-reset.py)
   audio/media     VirtualAudio HAL plug-in moved aside; MediaToolbox does not
                   start the recorder server (both crash without audio/GPU)
   SpringBoard     no watchdogs (CPU rendering is slow), launch watchdogs x20,
@@ -135,6 +143,25 @@ def migration_done(root):
         print('datamigrator sentinel removed')
 
 
+def migration_pending(root):
+    """Let the first boot run the data migration (a root that never booted)."""
+    path = os.path.join(root, 'private/var/mobile/Library/Preferences/com.apple.migration.plist')
+    if os.path.exists(path):
+        data = read_plist(path)
+        for k in ('LastSystemVersion', 'DMUserDataDisposition', 'DMLastMigrationResults'):
+            data.pop(k, None)
+        write_plist(path, data, MOBILE, MOBILE, 0o600)
+    d = os.path.join(root, 'private/var/datamigrator')
+    if not os.path.isdir(d):
+        os.makedirs(d, 0o755)
+        os.chown(d, MOBILE, MOBILE)
+    sentinel = os.path.join(d, 'migrate')
+    open(sentinel, 'a').close()
+    os.chown(sentinel, MOBILE, MOBILE)
+    os.chmod(sentinel, 0o644)
+    print('migration left to run on first boot (sentinel set)')
+
+
 def audio_media(root):
     plugin = os.path.join(root, 'Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin')
     if os.path.exists(plugin):
@@ -149,16 +176,22 @@ def audio_media(root):
 
 
 def main():
-    if len(sys.argv) != 2 or not os.path.isdir(os.path.join(sys.argv[1], 'System/Library/xpc')):
+    args = sys.argv[1:]
+    fresh = '--fresh' in args
+    args = [a for a in args if a != '--fresh']
+    if len(args) != 1 or not os.path.isdir(os.path.join(args[0], 'System/Library/xpc')):
         sys.exit(__doc__)
     if os.geteuid() != 0:
         sys.exit('run as root')
-    root = sys.argv[1]
+    root = args[0]
     launchd_jobs(root)
     containers(root)
     activation(root)
     audio_media(root)
-    migration_done(root)
+    if fresh:
+        migration_pending(root)
+    else:
+        migration_done(root)
     preferences(root, 'com.apple.springboard', {
         'BKNoWatchdogs': True, 'FBLaunchWatchdogScale': 20, 'SBShowBatteryPercentage': True,
         'FBLaunchWatchdogExceptions': {'com.apple.purplebuddy': 100.0},
